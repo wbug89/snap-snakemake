@@ -1,0 +1,13 @@
+workflow_stage: joint_shard
+project_dir: /mnt/22T/CWL_pc3/20260907_rerun_snpcalling/joint_PC3
+reference: /mnt/22T/CWL_pc3/refgenome/pasi3/pasi3.fa
+ploidy: 6
+
+gvcf_dirs:
+  - /mnt/22T/CWL_pc3/20260907_rerun_snpcalling/gvcf_all
+
+joint_contig_assignment_file: joint_contig_assignment.tsv
+joint_partition: PC3
+
+telegram:
+  enabled: false

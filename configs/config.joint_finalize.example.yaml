@@ -1,0 +1,12 @@
+workflow_stage: joint_finalize
+project_dir: /mnt/22T/CWL_pc3/20260907_rerun_snpcalling/joint_final
+reference: /mnt/22T/CWL_pc3/refgenome/pasi3/pasi3.fa
+ploidy: 6
+
+# Directories from PC1 and PC3 after copying/syncing per-contig VCFs to the final server.
+per_contig_dirs:
+  - /mnt/22T/CWL_pc3/20260907_rerun_snpcalling/joint_from_PC1/results/per_contig
+  - /mnt/22T/CWL_pc3/20260907_rerun_snpcalling/joint_PC3/results/per_contig
+
+telegram:
+  enabled: false

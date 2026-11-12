@@ -1,0 +1,10 @@
+workflow_stage: preprocess
+read_layout: PE
+batch_id: PC1_batch01
+project_dir: /path/to/preprocess_output
+fastq_dir: /path/to/rawData
+reference: /path/to/reference.fa
+ploidy: 6
+sample_group_regex: '^((?:IBC?|TN)[0-9]+)'
+telegram:
+  enabled: false

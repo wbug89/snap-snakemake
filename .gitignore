@@ -1,0 +1,68 @@
+# Snakemake runtime state
+.snakemake/
+
+# Python / editor / OS files
+__pycache__/
+*.py[cod]
+.DS_Store
+.vscode/
+.idea/
+
+# Conda / virtual environments
+.conda/
+.venv/
+venv/
+
+# Logs, temporary files, benchmarks
+logs/
+log/
+benchmarks/
+*.log
+*.tmp
+*.temp
+*.swp
+
+# Local run-specific configs and assignments
+# Keep config.yaml and tracked *.example.yaml templates.
+/config.*.yaml
+!/config.yaml
+/configs/*.yaml
+!/configs/*.example.yaml
+/sample_assignment.tsv
+/joint_contig_assignment.tsv
+
+# Local credentials / environment secrets
+.env
+.env.*
+*.private.yaml
+*.local.yaml
+
+# Typical large workflow outputs if a project is run inside the repository
+trimmed/
+mapped/
+sorted/
+marked/
+merged/
+gvcf_file/
+genomicsdb/
+results/
+metadata/
+
+# Common genomic outputs (avoid accidental commits of large analysis products)
+*.bam
+*.bai
+*.cram
+*.crai
+*.vcf
+*.vcf.gz
+*.vcf.gz.tbi
+*.bcf
+*.bcf.csi
+*.g.vcf.gz
+*.g.vcf.gz.tbi
+
+# Raw sequencing data
+*.fastq
+*.fastq.gz
+*.fq
+*.fq.gz

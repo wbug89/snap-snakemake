@@ -1,0 +1,12 @@
+workflow_stage: gvcf
+project_dir: /path/to/gvcf_output
+reference: /path/to/reference.fa
+ploidy: 6
+sample_group_regex: '^((?:IBC?|TN)[0-9]+)'
+marked_dirs:
+  - /path/to/batch01/marked
+  - /path/to/batch02/marked
+sample_assignment_file: sample_assignment.tsv
+calling_partition: PC1
+telegram:
+  enabled: false

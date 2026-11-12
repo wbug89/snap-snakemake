@@ -1,0 +1,12 @@
+name: snap-snakemake-v1.0.0
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python=3.12
+  - snakemake-minimal=9.26.1
+  - bwa=0.7.18
+  - samtools>=1.21
+  - bcftools>=1.21
+  - gatk4=4.6.1.0
+  - trimmomatic=0.39
