@@ -1,10 +1,120 @@
+# SNaP v1.0.1 example configuration — stage: full
+# Copy this file to a non-*.example.yaml local config before editing.
+# Local config files are ignored by Git. Do not commit Telegram credentials.
+
 workflow_stage: full
+
+# ---------- Shared workflow settings ----------
+# read_layout is used by preprocess/full. Allowed: SE, PE.
 read_layout: PE
+# Unique ID for one independently preprocessed sequencing batch.
 batch_id: batch1
+# Ploidy used by HaplotypeCaller. Example: 2=diploid, 6=hexaploid.
+ploidy: 6
+
 project_dir: /path/to/full_output
+# fastq_dir is used by preprocess/full; ignored by later stages.
 fastq_dir: /path/to/rawData
 reference: /path/to/reference.fa
-ploidy: 6
-sample_group_regex: '^((?:IBC?|TN)[0-9]+)'
+
+# Biological sample name extraction from a raw FASTQ unit name.
+# Capture biological sample ID in regex group 1. Adjust the prefix/number pattern to your filenames.
+# Examples: SM001_R1.fastq.gz, SM001_laneA_R1.fastq.gz -> SM001
+sample_group_regex: '^((?:SM)[0-9]{3})'
+
+# Exact raw sequencing units to skip during preprocess/full (without _R1/_R2 suffix).
+exclude_units: []
+
+# Biological-sample filters used when discovering marked BAMs/gVCFs.
+# Empty include list = include all discovered samples.
+include_biological_samples: []
+exclude_biological_samples: []
+# Optional text files containing one biological sample ID per line.
+include_biological_samples_file: null
+exclude_biological_samples_file: null
+
+# ---------- gVCF-stage distribution ----------
+# One or more directories containing *.marked.bam + index files.
+marked_dirs: []
+# Optional TSV with header: biological_sample<TAB>server
+sample_assignment_file: null
+# Partition/server name to select from sample_assignment_file, e.g. PC1 / PC3.
+calling_partition: null
+
+# ---------- joint / joint_shard inputs ----------
+# Every listed directory is searched for single-sample *.g.vcf.gz + .tbi files.
+# The COMPLETE cohort must be visible to every joint/joint_shard run.
+gvcf_dirs: []
+
+# joint_shard only: TSV header contig<TAB>server; every reference contig appears exactly once.
+joint_contig_assignment_file: null
+# Select one server/partition from the assignment file.
+joint_partition: null
+
+# ---------- joint_finalize inputs ----------
+# Directories containing completed per-contig VCFs + .tbi from all shard servers.
+per_contig_dirs: []
+
+# ---------- Executable names / paths ----------
+tools:
+  java: java
+  bwa: bwa
+  samtools: samtools
+  bcftools: bcftools
+  gatk: gatk
+  trimmomatic: trimmomatic
+
+# ---------- Trimmomatic ----------
+trimmomatic:
+  phred: -phred33
+  threads: 8
+  leading: 3
+  trailing: 3
+  slidingwindow: '4:30'
+  minlen: 36
+  # SNaP searches the active Trimmomatic installation first.
+  builtin_adapter_se: NexteraPE-PE.fa
+  builtin_adapter_pe: NexteraPE-PE.fa
+  # Fallback adapter FASTA paths; set null if no fallback is needed.
+  user_adapter_se: null
+  user_adapter_pe: null
+  illuminaclip_se: '2:30:10'
+  illuminaclip_pe: '2:30:10'
+
+# ---------- Per-rule CPU threads ----------
+resources:
+  bwa_threads: 12
+  samtools_view_threads: 4
+  samtools_sort_threads: 8
+  haplotypecaller_threads: 2
+
+# ---------- Java heap / JVM settings ----------
+java_options:
+  markduplicates: '-Xmx20g'
+  haplotypecaller: '-Xmx20g'
+  genomicsdbimport: '-Xmx16g -XX:ParallelGCThreads=2'
+  genotypegvcfs: '-Xmx32g -XX:ParallelGCThreads=2'
+
+# ---------- GenomicsDB / joint-genotyping resources ----------
+# These mem_mb values are PER JOB declarations.
+# For whole-machine limits, also pass --resources joint_jobs=N mem_mb=M at runtime.
+genomicsdb:
+  batch_size: 30
+  reader_threads: 1
+  import_mem_mb: 24000
+  genotype_mem_mb: 40000
+
+# ---------- Variant calling / filtering ----------
+calling:
+  minimum_mapping_quality: 30
+  # Conservative GATK limits for genotype-state explosion at polyploid multiallelic loci.
+  max_alternate_alleles: 6
+  max_genotype_count: 1024
+  hard_filter_expression: 'QD < 2.0 || FS > 60.0 || MQ < 40.0 || MQRankSum < -12.5 || ReadPosRankSum < -8.0'
+
+# ---------- Telegram notifications ----------
+# Recommended: keep bot_token/chat_id empty here and export TG_BOT_TOKEN/TG_CHAT_ID.
 telegram:
   enabled: false
+  bot_token: ''
+  chat_id: ''

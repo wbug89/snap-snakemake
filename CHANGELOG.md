@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.0.1 — documentation and configuration templates
+- Standardized the default `sample_group_regex` example as `^((?:SM)[0-9]{3})` and documented how to adapt capture group 1 to custom naming schemes, including `IB001`, `IBC1`/`TN71`, and `ABC_001`-style IDs.
+
+- Expanded English and Traditional Chinese README files with reference-genome indexing commands, stage-by-stage usage, config guidance, Snakemake commands, resource controls, and Telegram setup.
+- Expanded every `configs/*.example.yaml` template to expose all user-adjustable settings while retaining stage-specific example paths.
+- Standardized sample naming examples to `SM001`–`SM999` and the corresponding prefix-capture regex.
+- Removed `docs/GIT_ON_MAC.md` from the public project.
+- No SNP-calling algorithm or core workflow logic changed from v1.0.0.
+
 ## v1.0.0 — first formal release
 
 This is the first formally versioned release of **SNaP — Snakemake for NGS and Polyploids**.

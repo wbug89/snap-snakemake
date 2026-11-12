@@ -1,7 +1,7 @@
-# SNaP v1.0.0 release notes
+# SNaP v1.0.1 release notes
 
-**SNaP — Snakemake for NGS and Polyploids** is the first formal public release of this workflow.
+SNaP v1.0.1 is a documentation/configuration maintenance release. The SNP-calling and GenomicsDB logic are unchanged from v1.0.0.
 
-SNaP provides a reproducible RAD-seq SNP-calling workflow with configurable ploidy, GVCF-based calling, per-contig GenomicsDB joint genotyping, distributed contig partitioning, and final SNP identifiers standardized as `CHROM_POS`.
+Changes include complete reference-indexing instructions, stage-by-stage execution examples, expanded example configuration files, Telegram setup guidance, and a documented generic `sample_group_regex: '^((?:SM)[0-9]{3})'` that can be adapted to other sample naming schemes.
 
 Repository: `snap-snakemake`

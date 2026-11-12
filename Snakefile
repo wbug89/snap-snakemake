@@ -1,4 +1,4 @@
-# SNaP — Snakemake for NGS and Polyploids — v1.0.0
+# SNaP — Snakemake for NGS and Polyploids — v1.0.1
 # First formal release. Final SNP IDs use CHROM_POS (e.g. LG1_123456).
 import glob
 import os
@@ -290,8 +290,8 @@ def get_sm_name(raw_unit):
     sm = re.sub(r"_L\d{3}$", "", sm, flags=re.IGNORECASE)
 
     # Sequencing-run suffixes such as:
-    # IB001_22HNHHLT4 -> IB001
-    # IB001_22HNTCLT4 -> IB001
+    # SM001_22HNHHLT4 -> SM001
+    # SM001_22HNTCLT4 -> SM001
     # Only 9-16 character alphanumeric tokens containing BOTH letters and digits
     # are stripped automatically, reducing the chance of collapsing ordinary IDs.
     if "_" in sm:
@@ -307,9 +307,9 @@ def discover_fastqs(fq_dir, layout):
     Return raw_unit -> FASTQ path(s).
 
     SE accepts either:
-      IB001.fastq.gz
-      IB001_R1.fastq.gz
-      IB001_R1_001.fastq.gz
+      SM001.fastq.gz
+      SM001_R1.fastq.gz
+      SM001_R1_001.fastq.gz
     PE requires matching R1/R2 pairs.
     """
     if not os.path.isdir(fq_dir):
@@ -362,7 +362,7 @@ def make_unit_key(sample, raw_unit):
     Produce a globally unique output/read-group key.
 
     batch_id prevents collisions when two independent sequencing batches both use
-    a generic filename such as IB001_R1.fastq.gz.
+    a generic filename such as SM001_R1.fastq.gz.
     """
     if UNIT_DELIMITER in sample or UNIT_DELIMITER in raw_unit:
         raise ValueError(

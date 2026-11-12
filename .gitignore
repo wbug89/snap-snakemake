@@ -66,3 +66,6 @@ metadata/
 *.fastq.gz
 *.fq
 *.fq.gz
+
+# Local Git usage notes (not part of the public repository)
+/docs/GIT_ON_MAC.md
