@@ -1,12 +1,11 @@
-# v1.0.0 validation notes
+# SNaP v1.0.1 validation notes
 
-Performed in the artifact environment:
-
-- `workflow_inputs.py` compiled with Python 3.13.
-- Smoke-tested reference `.fai` parsing and multi-directory gVCF discovery with synthetic inputs.
-- Verified example TSVs contain real tab characters.
-- Verified the v1.0.0 `Snakefile` contains `joint_shard`, `joint_finalize`, per-contig `GenomicsDBImport`, per-contig `GenotypeGVCFs`, and `concat_joint_vcfs` rules.
-- Verified executable workflow code contains no `CombineGVCFs` rule/reference.
-- Parsed all YAML configuration examples with PyYAML.
-
-Limitation: Snakemake/GATK/bcftools executables are not installed in the artifact container, so an actual Snakemake DAG dry-run and real GATK execution could not be performed here. Run `snakemake -n -p` on PC1/PC3 before production execution.
+- YAML parsing validated for `config.yaml` and all `configs/*.example.yaml`.
+- Every example config exposes the same complete adjustable key set as the master config.
+- `workflow_inputs.py` compiles successfully.
+- Generic sample regex validated for `SM001`–`SM999` prefixes and rejects `SM000`/`SM1000`.
+- Reference-indexing instructions added for BWA, samtools, and GATK.
+- Final SNP IDs remain `CHROM_POS` via `bcftools annotate --set-id '%CHROM_%POS'`.
+- No executable `CombineGVCFs` rule is present.
+- Core SNP-calling / GenomicsDB logic is unchanged from v1.0.0.
+- `docs/GIT_ON_MAC.md` is not included in the public project.
