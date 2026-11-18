@@ -1,0 +1,33 @@
+# SNaP workstation profile: intended for ~32-64 GiB RAM and 8-16 CPU threads.
+cores: 12
+resources:
+  mem_mb: 48000
+  joint_jobs: 1
+rerun-incomplete: true
+set-threads:
+  trim_fastq_se: 4
+  trim_fastq_pe: 4
+  bwa_mapping: 6
+  samtools_sort_index: 4
+  gatk_haplotypecaller: 2
+set-resources:
+  trim_fastq_se:
+    mem_mb: 3072
+  trim_fastq_pe:
+    mem_mb: 3072
+  bwa_mapping:
+    mem_mb: 6144
+  samtools_sort_index:
+    mem_mb: 6144
+  mark_duplicates:
+    mem_mb: 8192
+  merge_marked_bam:
+    mem_mb: 6144
+  gatk_haplotypecaller:
+    mem_mb: 12288
+  genomicsdb_import:
+    mem_mb: 12288
+  genotype_gvcfs:
+    mem_mb: 16384
+  concat_joint_vcfs:
+    mem_mb: 4096

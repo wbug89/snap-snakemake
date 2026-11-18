@@ -37,34 +37,194 @@ def directories(config, key):
 
 def _dict_path(reference):
     p = Path(reference)
-    if p.suffix in {'.fa', '.fasta', '.fna'}:
+    if p.suffix.lower() in {'.fa', '.fasta', '.fna'}:
         return str(p.with_suffix('.dict'))
     return str(p) + '.dict'
 
 
 def reference_inputs(reference, stage):
+    """Validate reference prerequisites required by the selected stage.
+
+    BWA indexes are required only for preprocess/full because later stages do not map reads.
+    """
     reference = _abs(reference)
+    if not os.path.isfile(reference) or os.path.getsize(reference) == 0:
+        raise ValueError(f"Reference FASTA does not exist or is empty: {reference}")
+
     fai = reference + '.fai'
     dct = _dict_path(reference)
     required = [reference, fai, dct]
     if stage in {'preprocess', 'full'}:
         required += [reference + x for x in ('.amb', '.ann', '.bwt', '.pac', '.sa')]
+
     missing = [x for x in required if not os.path.isfile(x) or os.path.getsize(x) == 0]
     if missing:
-        raise ValueError('Missing/empty reference prerequisite(s): ' + ', '.join(missing))
+        commands = [
+            f"samtools faidx {reference}",
+            f"gatk CreateSequenceDictionary -R {reference} -O {dct}",
+        ]
+        if stage in {'preprocess', 'full'}:
+            commands.insert(0, f"bwa index {reference}")
+        raise ValueError(
+            "Missing/empty reference prerequisite(s):\n  - " + "\n  - ".join(missing)
+            + "\nCreate the required indexes before running SNaP, for example:\n  "
+            + "\n  ".join(commands)
+        )
 
     contigs = []
+    seen = set()
     with open(fai) as fh:
-        for line in fh:
+        for lineno, line in enumerate(fh, 1):
             if not line.strip():
                 continue
             parts = line.rstrip('\n').split('\t')
             if len(parts) < 2:
-                raise ValueError(f"Malformed FASTA index line in {fai}: {line.rstrip()}")
-            contigs.append((parts[0], int(parts[1])))
+                raise ValueError(f"Malformed FASTA index line {lineno} in {fai}: {line.rstrip()}")
+            name, length_s = parts[0], parts[1]
+            if name in seen:
+                raise ValueError(f"Duplicate sequence name in FASTA index: {name}")
+            seen.add(name)
+            try:
+                length = int(length_s)
+            except ValueError as exc:
+                raise ValueError(f"Invalid length for sequence {name} in {fai}: {length_s}") from exc
+            if length <= 0:
+                raise ValueError(f"Non-positive length for sequence {name} in {fai}: {length}")
+            contigs.append((name, length))
     if not contigs:
-        raise ValueError(f"No contigs found in FASTA index: {fai}")
+        raise ValueError(f"No sequences found in FASTA index: {fai}")
     return required, contigs
+
+
+def select_reference_sequences(contigs, config):
+    """Select reference sequences and return selected tuples plus audit metadata."""
+    settings = config.get('reference_intervals', {}) or {}
+    mode = str(settings.get('mode', 'all')).lower()
+    valid = {'all', 'regex', 'min_length', 'list', 'file'}
+    if mode not in valid:
+        raise ValueError(f"reference_intervals.mode must be one of {sorted(valid)}; got: {mode}")
+
+    names = [name for name, _ in contigs]
+    name_set = set(names)
+    selected_set = set()
+    reasons = {}
+
+    if mode == 'all':
+        selected_set = set(names)
+    elif mode == 'regex':
+        pattern = settings.get('regex')
+        if not pattern:
+            raise ValueError("reference_intervals.mode=regex requires reference_intervals.regex")
+        try:
+            rx = re.compile(str(pattern))
+        except re.error as exc:
+            raise ValueError(f"Invalid reference_intervals.regex: {pattern}: {exc}") from exc
+        selected_set = {name for name in names if rx.search(name)}
+        reasons = {name: 'regex_mismatch' for name in names if name not in selected_set}
+    elif mode == 'min_length':
+        threshold = settings.get('min_length')
+        if threshold is None:
+            raise ValueError("reference_intervals.mode=min_length requires reference_intervals.min_length")
+        threshold = int(threshold)
+        if threshold < 1:
+            raise ValueError("reference_intervals.min_length must be >= 1")
+        selected_set = {name for name, length in contigs if length >= threshold}
+        reasons = {name: f'length_below_{threshold}' for name, length in contigs if length < threshold}
+    elif mode == 'list':
+        requested = [str(x) for x in (settings.get('sequences', []) or [])]
+        if not requested:
+            raise ValueError("reference_intervals.mode=list requires a non-empty reference_intervals.sequences")
+        if len(requested) != len(set(requested)):
+            raise ValueError("reference_intervals.sequences contains duplicate sequence names")
+        unknown = set(requested) - name_set
+        if unknown:
+            raise ValueError("Unknown reference sequence(s) in reference_intervals.sequences: " + ', '.join(sorted(unknown)))
+        selected_set = set(requested)
+        reasons = {name: 'not_in_list' for name in names if name not in selected_set}
+    elif mode == 'file':
+        path = settings.get('file')
+        if not path:
+            raise ValueError("reference_intervals.mode=file requires reference_intervals.file")
+        ap = _abs(path)
+        if not os.path.isfile(ap):
+            raise ValueError(f"reference_intervals.file does not exist: {ap}")
+        requested = []
+        with open(ap) as fh:
+            for raw in fh:
+                value = raw.strip()
+                if value and not value.startswith('#'):
+                    requested.append(value.split()[0])
+        if not requested:
+            raise ValueError(f"reference_intervals.file contains no sequence names: {ap}")
+        if len(requested) != len(set(requested)):
+            raise ValueError(f"reference_intervals.file contains duplicate sequence names: {ap}")
+        unknown = set(requested) - name_set
+        if unknown:
+            raise ValueError("Unknown reference sequence(s) in reference_intervals.file: " + ', '.join(sorted(unknown)))
+        selected_set = set(requested)
+        reasons = {name: 'not_in_file' for name in names if name not in selected_set}
+
+    selected = [(name, length) for name, length in contigs if name in selected_set]
+    if not selected:
+        raise ValueError(f"Reference interval selection mode '{mode}' retained zero sequences.")
+
+    audit = []
+    for name, length in contigs:
+        audit.append({
+            'sequence': name,
+            'length': length,
+            'selected': name in selected_set,
+            'exclusion_reason': '.' if name in selected_set else reasons.get(name, 'excluded'),
+        })
+    return selected, audit, mode
+
+
+def build_joint_shards(selected_contigs, config):
+    """Build deterministic global shards from selected reference sequences.
+
+    contig strategy: one sequence per shard.
+    balanced strategy: longest-processing-time greedy balancing by sequence length.
+    """
+    settings = config.get('joint_sharding', {}) or {}
+    strategy = str(settings.get('strategy', 'contig')).lower()
+    if strategy not in {'contig', 'balanced'}:
+        raise ValueError("joint_sharding.strategy must be 'contig' or 'balanced'")
+
+    selected_contigs = list(selected_contigs)
+    if not selected_contigs:
+        raise ValueError('Cannot build joint shards from an empty sequence set.')
+
+    if strategy == 'contig':
+        return [
+            {
+                'shard': f'{i:06d}',
+                'sequences': [name],
+                'length': length,
+            }
+            for i, (name, length) in enumerate(selected_contigs, 1)
+        ], strategy
+
+    requested = settings.get('shards', None)
+    if requested in (None, '', 0):
+        requested = min(8, len(selected_contigs))
+    requested = int(requested)
+    if requested < 1:
+        raise ValueError('joint_sharding.shards must be >= 1')
+    n_shards = min(requested, len(selected_contigs))
+
+    # LPT greedy balancing. Ties are deterministic by reference sequence name.
+    bins = [{'length': 0, 'sequences': []} for _ in range(n_shards)]
+    for name, length in sorted(selected_contigs, key=lambda x: (-x[1], x[0])):
+        idx = min(range(n_shards), key=lambda i: (bins[i]['length'], i))
+        bins[idx]['sequences'].append(name)
+        bins[idx]['length'] += length
+
+    reference_order = {name: i for i, (name, _) in enumerate(selected_contigs)}
+    shards = []
+    for i, bucket in enumerate(bins, 1):
+        seqs = sorted(bucket['sequences'], key=lambda name: reference_order[name])
+        shards.append({'shard': f'{i:06d}', 'sequences': seqs, 'length': bucket['length']})
+    return shards, strategy
 
 
 def _read_id_file(path):

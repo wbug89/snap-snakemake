@@ -1,0 +1,33 @@
+# SNaP low-memory profile: intended for ~16 GiB RAM and 4-8 CPU threads.
+cores: 4
+resources:
+  mem_mb: 12000
+  joint_jobs: 1
+rerun-incomplete: true
+set-threads:
+  trim_fastq_se: 2
+  trim_fastq_pe: 2
+  bwa_mapping: 2
+  samtools_sort_index: 2
+  gatk_haplotypecaller: 1
+set-resources:
+  trim_fastq_se:
+    mem_mb: 1536
+  trim_fastq_pe:
+    mem_mb: 1536
+  bwa_mapping:
+    mem_mb: 3072
+  samtools_sort_index:
+    mem_mb: 3072
+  mark_duplicates:
+    mem_mb: 4096
+  merge_marked_bam:
+    mem_mb: 3072
+  gatk_haplotypecaller:
+    mem_mb: 6144
+  genomicsdb_import:
+    mem_mb: 6144
+  genotype_gvcfs:
+    mem_mb: 8192
+  concat_joint_vcfs:
+    mem_mb: 2048

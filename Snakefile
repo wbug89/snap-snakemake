@@ -1,8 +1,10 @@
-# SNaP — Snakemake for NGS and Polyploids — v1.0.1
-# First formal release. Final SNP IDs use CHROM_POS (e.g. LG1_123456).
+# SNaP — Snakemake for NGS and Polyploids — v1.0.2
+# Portability/resource-safety release. Final SNP IDs use CHROM_POS (e.g. LG1_123456).
 import glob
 import os
+import platform
 import re
+import subprocess
 import shutil
 import shlex
 import sys
@@ -16,8 +18,14 @@ from snakemake.shell import shell
 
 configfile: "config.yaml"
 sys.path.insert(0, workflow.basedir)
-from workflow_inputs import (reference_inputs, discover_marked, discover_gvcfs,
-                             selected_samples, safe_id, directories)
+from workflow_inputs import (reference_inputs, select_reference_sequences, build_joint_shards,
+                             discover_marked, discover_gvcfs, selected_samples, safe_id, directories)
+
+# Treat memory as a whole-machine scheduling constraint for local/workstation use.
+# Profiles or CLI --resources values then prevent concurrent heavy jobs from overcommitting RAM.
+resource_scopes:
+    mem_mb="global",
+    joint_jobs="global"
 
 
 ############################################
@@ -90,6 +98,10 @@ gvcf_dir      = os.path.join(path_start, "gvcf_file")
 results_dir   = os.path.join(path_start, "results")
 log_dir       = os.path.join(path_start, "logs")
 benchmark_dir = os.path.join(path_start, "benchmarks")
+preflight_summary_path = os.path.join(metadata_dir, "preflight_summary.txt")
+reference_metadata_path = os.path.join(metadata_dir, "reference_sequences.tsv")
+selected_intervals_path = os.path.join(metadata_dir, "selected_intervals.list")
+fastq_metadata_path = os.path.join(metadata_dir, "fastq_units.tsv")
 
 # Validate stage inputs before adapter discovery or output-directory creation.
 if WORKFLOW_STAGE == "gvcf":
@@ -101,12 +113,38 @@ elif WORKFLOW_STAGE in {"joint", "joint_shard"}:
 elif WORKFLOW_STAGE == "joint_finalize":
     directories(config, "per_contig_dirs")
 REFERENCE_INPUTS, REFERENCE_CONTIGS = reference_inputs(reference_dir, WORKFLOW_STAGE)
+SELECTED_REFERENCE_CONTIGS, REFERENCE_AUDIT, REFERENCE_INTERVAL_MODE = select_reference_sequences(
+    REFERENCE_CONTIGS, config
+)
+JOINT_SHARDS, JOINT_SHARD_STRATEGY = build_joint_shards(SELECTED_REFERENCE_CONTIGS, config)
+SELECTED_SEQUENCE_SET = {name for name, _ in SELECTED_REFERENCE_CONTIGS}
+REFERENCE_TOTAL_LENGTH = sum(length for _, length in REFERENCE_CONTIGS)
+SELECTED_REFERENCE_LENGTH = sum(length for _, length in SELECTED_REFERENCE_CONTIGS)
+
+def detected_memory_mb():
+    try:
+        pages = os.sysconf("SC_PHYS_PAGES")
+        page_size = os.sysconf("SC_PAGE_SIZE")
+        return int(pages * page_size / 1024 / 1024)
+    except (AttributeError, ValueError, OSError):
+        if platform.system() == "Darwin":
+            try:
+                value = subprocess.check_output(["sysctl", "-n", "hw.memsize"], text=True).strip()
+                return int(int(value) / 1024 / 1024)
+            except Exception:
+                return None
+        return None
+
+
+DETECTED_CPU_THREADS = os.cpu_count() or 1
+DETECTED_MEMORY_MB = detected_memory_mb()
 
 ############################################
 # Optional notifications
 ############################################
 
 ENABLE_TELEGRAM = bool(cfg("telegram", "enabled", False))
+PREFLIGHT_ONLY = bool(config.get("snap_preflight_only", False))
 
 # Values set directly in config take precedence. Empty config values fall back
 # to environment variables so secrets do not need to be stored in the workflow.
@@ -135,11 +173,11 @@ if ENABLE_TELEGRAM and TELEGRAM_MISSING_SETTINGS:
     )
 
 ############################################
-# Shared parameters (SE/PE/ploidy use same values)
+# Shared parameters and per-rule resources
 ############################################
 
 TRIMMOMATIC_PHRED   = cfg("trimmomatic", "phred", "-phred33")
-TRIMMOMATIC_THREADS = int(cfg("trimmomatic", "threads", 8))
+TRIMMOMATIC_THREADS = int(cfg("resources", "trimmomatic_threads", cfg("trimmomatic", "threads", 2)))
 LEADING             = int(cfg("trimmomatic", "leading", 3))
 TRAILING            = int(cfg("trimmomatic", "trailing", 3))
 SLIDINGWINDOW       = str(cfg("trimmomatic", "slidingwindow", "4:30"))
@@ -147,22 +185,40 @@ MINLEN              = int(cfg("trimmomatic", "minlen", 36))
 ILLUMINACLIP_SE     = str(cfg("trimmomatic", "illuminaclip_se", "2:30:10"))
 ILLUMINACLIP_PE     = str(cfg("trimmomatic", "illuminaclip_pe", "2:30:10"))
 
-BWA_THREADS           = int(cfg("resources", "bwa_threads", 12))
-SAMTOOLS_VIEW_THREADS = int(cfg("resources", "samtools_view_threads", 4))
-SAMTOOLS_SORT_THREADS = int(cfg("resources", "samtools_sort_threads", 8))
+BWA_THREADS           = int(cfg("resources", "bwa_threads", 4))
+SAMTOOLS_VIEW_THREADS = int(cfg("resources", "samtools_view_threads", 1))
+SAMTOOLS_SORT_THREADS = int(cfg("resources", "samtools_sort_threads", 2))
 HC_THREADS            = int(cfg("resources", "haplotypecaller_threads", 2))
 MIN_MAPPING_QUALITY   = int(cfg("calling", "minimum_mapping_quality", 30))
 
-MARKDUP_JAVA_OPTS  = str(cfg("java_options", "markduplicates", "-Xmx20g"))
-HC_JAVA_OPTS       = str(cfg("java_options", "haplotypecaller", "-Xmx20g"))
-GENOMICSDB_JAVA_OPTS = str(cfg("java_options", "genomicsdbimport", "-Xmx16g -XX:ParallelGCThreads=2"))
-GENOTYPE_JAVA_OPTS = str(cfg("java_options", "genotypegvcfs", "-Xmx32g -XX:ParallelGCThreads=2"))
-GENOMICSDB_BATCH_SIZE = int(cfg("genomicsdb", "batch_size", 30))
+# Per-job memory declarations. Workflow profiles can override these with set-resources.
+TRIMMOMATIC_MEM_MB = int(cfg("resources", "trimmomatic_mem_mb", 2048))
+BWA_MEM_MB         = int(cfg("resources", "bwa_mem_mb", 4096))
+SORT_MEM_MB        = int(cfg("resources", "samtools_sort_mem_mb", 4096))
+MARKDUP_MEM_MB     = int(cfg("resources", "markduplicates_mem_mb", 6144))
+MERGE_MEM_MB       = int(cfg("resources", "merge_bam_mem_mb", 4096))
+HC_MEM_MB          = int(cfg("resources", "haplotypecaller_mem_mb", 8192))
+BCFTOOLS_MEM_MB    = int(cfg("resources", "bcftools_mem_mb", 2048))
+
+MARKDUP_JAVA_EXTRA = str(cfg("java_options", "markduplicates_extra", "") or "")
+HC_JAVA_EXTRA = str(cfg("java_options", "haplotypecaller_extra", "") or "")
+GENOMICSDB_JAVA_EXTRA = str(cfg("java_options", "genomicsdbimport_extra", "-XX:ParallelGCThreads=2") or "")
+GENOTYPE_JAVA_EXTRA = str(cfg("java_options", "genotypegvcfs_extra", "-XX:ParallelGCThreads=2") or "")
+
+GENOMICSDB_BATCH_SIZE    = int(cfg("genomicsdb", "batch_size", 30))
 GENOMICSDB_READER_THREADS = int(cfg("genomicsdb", "reader_threads", 1))
-GENOMICSDB_MEM_MB = int(cfg("genomicsdb", "import_mem_mb", 24000))
-GENOTYPE_MEM_MB = int(cfg("genomicsdb", "genotype_mem_mb", 40000))
-MAX_ALTERNATE_ALLELES = int(cfg("calling", "max_alternate_alleles", 6))
-MAX_GENOTYPE_COUNT = int(cfg("calling", "max_genotype_count", 1024))
+GENOMICSDB_MEM_MB        = int(cfg("genomicsdb", "import_mem_mb", 8192))
+GENOTYPE_MEM_MB          = int(cfg("genomicsdb", "genotype_mem_mb", 12288))
+MAX_ALTERNATE_ALLELES    = int(cfg("calling", "max_alternate_alleles", 6))
+MAX_GENOTYPE_COUNT       = int(cfg("calling", "max_genotype_count", 1024))
+
+
+def java_options_from_mem(mem_mb, extra=""):
+    """Use ~75% of the declared job memory for Java heap, leaving native/off-heap headroom."""
+    mem_mb = int(mem_mb)
+    heap_mb = max(512, int(mem_mb * 0.75))
+    return f"-Xmx{heap_mb}m" + (f" {extra.strip()}" if str(extra).strip() else "")
+
 
 VARIANT_FILTER = str(cfg(
     "calling",
@@ -258,12 +314,23 @@ if WORKFLOW_STAGE in {"preprocess", "full"}:
 # FASTQ/unit discovery and biological-sample grouping
 ############################################
 
-FASTQ_RE = re.compile(r"\.(fastq|fq)\.gz$", flags=re.IGNORECASE)
-R1_RE = re.compile(r"^(?P<unit>.+)_R1(?P<lane>_001)?(?P<ext>\.(?:fastq|fq)\.gz)$", flags=re.IGNORECASE)
-R2_RE = re.compile(r"^(?P<unit>.+)_R2(?P<lane>_001)?(?P<ext>\.(?:fastq|fq)\.gz)$", flags=re.IGNORECASE)
+SUPPORTED_FASTQ_EXTENSIONS = (".fastq.gz", ".fq.gz", ".fastq", ".fq")
+FASTQ_RE = re.compile(r"\.(?:fastq|fq)(?:\.gz)?$", flags=re.IGNORECASE)
+R1_RE = re.compile(r"^(?P<unit>.+)_R1(?P<lane>_001)?(?P<ext>\.(?:fastq|fq)(?:\.gz)?)$", flags=re.IGNORECASE)
+R2_RE = re.compile(r"^(?P<unit>.+)_R2(?P<lane>_001)?(?P<ext>\.(?:fastq|fq)(?:\.gz)?)$", flags=re.IGNORECASE)
+INTERMEDIATE_FASTQ_RE = re.compile(
+    r"(?:^|[._-])(trim(?:med)?|paired|unpaired)(?:[._-]|$)", flags=re.IGNORECASE
+)
 
-SAMPLE_GROUP_REGEX = config.get("sample_group_regex", None)
+SAMPLE_GROUP_REGEX = config.get("sample_group_regex", r"^((?:SM)[0-9]{3})")
 BATCH_TOKEN_RE = re.compile(r"^(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9]{9,16}$")
+
+try:
+    SAMPLE_GROUP_PATTERN = re.compile(str(SAMPLE_GROUP_REGEX)) if SAMPLE_GROUP_REGEX else None
+except re.error as exc:
+    raise ValueError(f"Invalid sample_group_regex: {SAMPLE_GROUP_REGEX}: {exc}") from exc
+if SAMPLE_GROUP_PATTERN and SAMPLE_GROUP_PATTERN.groups < 1:
+    raise ValueError("sample_group_regex must contain capture group 1 for the biological sample ID.")
 
 
 def strip_fastq_suffix(filename):
@@ -272,89 +339,129 @@ def strip_fastq_suffix(filename):
 
 def get_sm_name(raw_unit):
     """Convert one FASTQ unit name to the biological sample (GATK SM)."""
-    if SAMPLE_GROUP_REGEX:
-        m = re.search(str(SAMPLE_GROUP_REGEX), raw_unit)
-        if not m or m.lastindex is None:
+    if SAMPLE_GROUP_PATTERN:
+        m = SAMPLE_GROUP_PATTERN.search(raw_unit)
+        if not m:
             raise ValueError(
-                f"sample_group_regex did not capture a biological sample for '{raw_unit}': "
-                f"{SAMPLE_GROUP_REGEX}"
+                f"sample_group_regex did not match raw unit '{raw_unit}': {SAMPLE_GROUP_REGEX}. "
+                "Capture group 1 must contain only the biological sample ID."
             )
-        return safe_id(m.group(1))
+        value = m.group(1)
+        if not value:
+            raise ValueError(f"sample_group_regex capture group 1 is empty for raw unit '{raw_unit}'.")
+        return safe_id(value)
 
-    # Existing naming convention: S_TARI0166__2_H9 -> S_TARI0166
     if "__" in raw_unit:
-        return raw_unit.split("__", 1)[0]
-
-    # Standard Illumina lane suffixes.
+        return safe_id(raw_unit.split("__", 1)[0])
     sm = re.sub(r"_S\d+_L\d{3}$", "", raw_unit, flags=re.IGNORECASE)
     sm = re.sub(r"_L\d{3}$", "", sm, flags=re.IGNORECASE)
-
-    # Sequencing-run suffixes such as:
-    # SM001_22HNHHLT4 -> SM001
-    # SM001_22HNTCLT4 -> SM001
-    # Only 9-16 character alphanumeric tokens containing BOTH letters and digits
-    # are stripped automatically, reducing the chance of collapsing ordinary IDs.
     if "_" in sm:
         prefix, suffix = sm.rsplit("_", 1)
         if BATCH_TOKEN_RE.fullmatch(suffix):
             sm = prefix
-
     return safe_id(sm)
 
 
-def discover_fastqs(fq_dir, layout):
-    """
-    Return raw_unit -> FASTQ path(s).
+def _is_supported_fastq(name):
+    lower = name.lower()
+    return any(lower.endswith(ext) for ext in SUPPORTED_FASTQ_EXTENSIONS)
 
-    SE accepts either:
-      SM001.fastq.gz
-      SM001_R1.fastq.gz
-      SM001_R1_001.fastq.gz
-    PE requires matching R1/R2 pairs.
+
+def _candidate_pair_key(name):
+    m1 = R1_RE.match(name)
+    if m1:
+        return (m1.group("unit"), m1.group("lane") or "", "R1")
+    m2 = R2_RE.match(name)
+    if m2:
+        return (m2.group("unit"), m2.group("lane") or "", "R2")
+    return None
+
+
+def discover_fastqs(fq_dir, layout):
+    """Discover raw FASTQs with strict SE/PE validation.
+
+    Supported: .fastq.gz, .fq.gz, .fastq, .fq.
+    Files containing trimmed/paired/unpaired output tokens are ignored so workflow
+    intermediates cannot be rediscovered as new raw units.
     """
     if not os.path.isdir(fq_dir):
         raise FileNotFoundError(f"FASTQ directory does not exist: {fq_dir}")
 
-    entries = sorted(
-        f for f in os.listdir(fq_dir)
-        if os.path.isfile(os.path.join(fq_dir, f)) and FASTQ_RE.search(f)
-    )
+    entries = []
+    ignored_intermediate = []
+    for f in sorted(os.listdir(fq_dir)):
+        path = os.path.join(fq_dir, f)
+        if not os.path.isfile(path) or not _is_supported_fastq(f):
+            continue
+        if INTERMEDIATE_FASTQ_RE.search(strip_fastq_suffix(f)):
+            ignored_intermediate.append(f)
+            continue
+        entries.append(f)
+
+    if not entries:
+        raise ValueError(
+            f"No raw FASTQ files were found in {fq_dir}. Supported extensions: "
+            + ", ".join(SUPPORTED_FASTQ_EXTENSIONS)
+        )
 
     if layout == "SE":
         found = {}
         for f in entries:
-            # Never use an R2 file as an SE input.
             if R2_RE.match(f):
                 continue
-
             m = R1_RE.match(f)
             raw_unit = m.group("unit") if m else strip_fastq_suffix(f)
+            path = os.path.join(fq_dir, f)
             if raw_unit in found:
                 raise ValueError(
-                    f"Multiple SE FASTQs resolve to the same unit '{raw_unit}' in {fq_dir}: "
-                    f"{found[raw_unit]} and {os.path.join(fq_dir, f)}"
+                    f"Multiple SE FASTQs resolve to unit '{raw_unit}': {found[raw_unit]} and {path}"
                 )
-            found[raw_unit] = os.path.join(fq_dir, f)
-        return found
+            found[raw_unit] = path
+        if not found:
+            raise ValueError(f"No SE FASTQ units were retained from {fq_dir}.")
+        return found, ignored_intermediate
+
+    # PE: index R1/R2 independently so the mates may use any supported extension.
+    pairs = {}
+    unrecognized = []
+    for f in entries:
+        key = _candidate_pair_key(f)
+        if key is None:
+            unrecognized.append(f)
+            continue
+        unit, lane, mate = key
+        pair_key = (unit, lane)
+        pairs.setdefault(pair_key, {})
+        if mate in pairs[pair_key]:
+            raise ValueError(f"Duplicate {mate} FASTQ for PE unit '{unit}{lane}' in {fq_dir}")
+        pairs[pair_key][mate] = os.path.join(fq_dir, f)
+
+    if unrecognized:
+        preview = ", ".join(unrecognized[:10])
+        raise ValueError(
+            "PE mode requires filenames ending in _R1/_R2 (optionally _001) before the FASTQ extension. "
+            f"Unrecognized raw FASTQ file(s): {preview}"
+        )
 
     found = {}
-    for f in entries:
-        m = R1_RE.match(f)
-        if not m:
+    missing = []
+    for (unit, lane), mates in sorted(pairs.items()):
+        absent = [x for x in ("R1", "R2") if x not in mates]
+        if absent:
+            missing.append(f"{unit}{lane}: missing {'/'.join(absent)}")
             continue
-
-        raw_unit = m.group("unit")
-        lane = m.group("lane") or ""
-        ext = m.group("ext")
-        r1 = os.path.join(fq_dir, f)
-        r2 = os.path.join(fq_dir, f"{raw_unit}_R2{lane}{ext}")
-
-        if not os.path.isfile(r2):
-            raise FileNotFoundError(f"R1 exists but matching R2 is missing: {r1} -> {r2}")
+        raw_unit = unit
         if raw_unit in found:
-            raise ValueError(f"Duplicate PE FASTQ unit '{raw_unit}' in {fq_dir}")
-        found[raw_unit] = (r1, r2)
-    return found
+            raise ValueError(
+                f"Multiple PE lane groups resolve to the same raw unit '{raw_unit}'. "
+                "Include lane/run information before _R1/_R2 so each raw unit remains unique."
+            )
+        found[raw_unit] = (mates["R1"], mates["R2"])
+    if missing:
+        raise FileNotFoundError("Incomplete PE FASTQ pair(s):\n  - " + "\n  - ".join(missing))
+    if not found:
+        raise ValueError(f"No complete PE FASTQ pairs were found in {fq_dir}.")
+    return found, ignored_intermediate
 
 
 def make_unit_key(sample, raw_unit):
@@ -375,13 +482,14 @@ def make_unit_key(sample, raw_unit):
 
 
 RAW_FASTQ_MAP = {}
+IGNORED_INTERMEDIATE_FASTQS = []
 UNIT_FASTQ_MAP = {}
 UNIT_META = {}
 local_units = []
 skipped_units = []
 
 if WORKFLOW_STAGE in {"preprocess", "full"}:
-    RAW_FASTQ_MAP = discover_fastqs(fastq_dir, READ_LAYOUT)
+    RAW_FASTQ_MAP, IGNORED_INTERMEDIATE_FASTQS = discover_fastqs(fastq_dir, READ_LAYOUT)
 
     retained_samples = set(selected_samples(config, {get_sm_name(u) for u in RAW_FASTQ_MAP}))
 
@@ -434,16 +542,18 @@ sample_names = sorted(
     joint_bams_by_sample if WORKFLOW_STAGE in {"gvcf", "full"} else external_gvcfs
 )
 
-# Reference-order shard IDs are stable across machines and are used only as filenames.
-CONTIG_RECORDS = [
-    {"shard": f"{i:06d}", "contig": name, "length": length}
-    for i, (name, length) in enumerate(REFERENCE_CONTIGS, 1)
-]
-CONTIG_BY_SHARD = {x["shard"]: x for x in CONTIG_RECORDS}
-SHARD_BY_CONTIG = {x["contig"]: x["shard"] for x in CONTIG_RECORDS}
+# Joint shard IDs are deterministic for a given reference selection + sharding config.
+SHARD_RECORDS = list(JOINT_SHARDS)
+SHARD_BY_ID = {x["shard"]: x for x in SHARD_RECORDS}
+SHARD_BY_SEQUENCE = {
+    sequence: rec["shard"]
+    for rec in SHARD_RECORDS
+    for sequence in rec["sequences"]
+}
 
 
 def read_contig_assignment(path):
+    """Read sequence->partition assignments for distributed joint_shard execution."""
     if not path:
         return {}
     ap = as_abs(path)
@@ -456,39 +566,55 @@ def read_contig_assignment(path):
             if not line or line.startswith("#"):
                 continue
             parts = re.split(r"\t+|\s+", line)
-            if parts[0].lower() in {"contig", "chromosome", "lg"}:
+            if parts[0].lower() in {"contig", "chromosome", "lg", "sequence"}:
                 continue
             if len(parts) < 2:
-                raise ValueError(f"Malformed contig assignment line {lineno}: {line}")
-            contig, partition = parts[0], parts[1]
-            if contig not in SHARD_BY_CONTIG:
-                raise ValueError(f"Contig in assignment is absent from reference .fai: {contig}")
-            if contig in assignment:
-                raise ValueError(f"Duplicate contig in joint_contig_assignment_file: {contig}")
-            assignment[contig] = partition
-    missing = set(SHARD_BY_CONTIG) - set(assignment)
+                raise ValueError(f"Malformed sequence assignment line {lineno}: {line}")
+            sequence, partition = parts[0], parts[1]
+            if sequence not in SELECTED_SEQUENCE_SET:
+                # Excluded reference sequences do not need assignment and are ignored.
+                if sequence in {name for name, _ in REFERENCE_CONTIGS}:
+                    continue
+                raise ValueError(f"Sequence in assignment is absent from reference .fai: {sequence}")
+            if sequence in assignment:
+                raise ValueError(f"Duplicate sequence in joint_contig_assignment_file: {sequence}")
+            assignment[sequence] = partition
+    missing = SELECTED_SEQUENCE_SET - set(assignment)
     if missing:
-        raise ValueError("Contigs missing from joint_contig_assignment_file: " + ", ".join(sorted(missing)))
+        raise ValueError(
+            "Selected reference sequences missing from joint_contig_assignment_file: "
+            + ", ".join(sorted(missing))
+        )
     return assignment
 
 
 JOINT_PARTITION = str(config.get("joint_partition", "") or "").strip()
 CONTIG_ASSIGNMENT = {}
+SHARD_PARTITION = {}
 if WORKFLOW_STAGE == "joint_shard":
     assignment_file = config.get("joint_contig_assignment_file")
     if not assignment_file or not JOINT_PARTITION:
         raise ValueError("joint_shard requires joint_contig_assignment_file and joint_partition")
     CONTIG_ASSIGNMENT = read_contig_assignment(assignment_file)
-    ACTIVE_CONTIG_RECORDS = [
-        x for x in CONTIG_RECORDS if CONTIG_ASSIGNMENT[x["contig"]] == JOINT_PARTITION
+    for rec in SHARD_RECORDS:
+        parts = {CONTIG_ASSIGNMENT[seq] for seq in rec["sequences"]}
+        if len(parts) != 1:
+            raise ValueError(
+                f"Balanced shard {rec['shard']} contains sequences assigned to multiple partitions: "
+                + ", ".join(f"{seq}={CONTIG_ASSIGNMENT[seq]}" for seq in rec["sequences"])
+                + ". Reassign sequences so every sequence within one balanced shard uses the same partition."
+            )
+        SHARD_PARTITION[rec["shard"]] = next(iter(parts))
+    ACTIVE_SHARD_RECORDS = [
+        rec for rec in SHARD_RECORDS if SHARD_PARTITION[rec["shard"]] == JOINT_PARTITION
     ]
-    if not ACTIVE_CONTIG_RECORDS:
-        raise ValueError(f"No contigs are assigned to joint_partition={JOINT_PARTITION}")
+    if not ACTIVE_SHARD_RECORDS:
+        raise ValueError(f"No joint shards are assigned to joint_partition={JOINT_PARTITION}")
 elif WORKFLOW_STAGE in {"joint", "full"}:
-    ACTIVE_CONTIG_RECORDS = list(CONTIG_RECORDS)
+    ACTIVE_SHARD_RECORDS = list(SHARD_RECORDS)
 else:
-    ACTIVE_CONTIG_RECORDS = []
-ACTIVE_SHARDS = [x["shard"] for x in ACTIVE_CONTIG_RECORDS]
+    ACTIVE_SHARD_RECORDS = []
+ACTIVE_SHARDS = [x["shard"] for x in ACTIVE_SHARD_RECORDS]
 
 # joint_finalize receives completed per-contig VCFs from one or more joint_shard servers.
 external_per_contig = {}
@@ -498,7 +624,7 @@ if WORKFLOW_STAGE == "joint_finalize":
             if p.name.endswith(".vcf.gz.tbi"):
                 continue
             shard = p.name[:-len(".vcf.gz")]
-            if shard not in CONTIG_BY_SHARD:
+            if shard not in SHARD_BY_ID:
                 continue
             ap = str(p.resolve())
             if shard in external_per_contig:
@@ -506,7 +632,7 @@ if WORKFLOW_STAGE == "joint_finalize":
             if not os.path.isfile(ap + ".tbi"):
                 raise ValueError(f"Missing index for per-contig VCF: {ap}.tbi")
             external_per_contig[shard] = ap
-    missing = [x["shard"] for x in CONTIG_RECORDS if x["shard"] not in external_per_contig]
+    missing = [x["shard"] for x in SHARD_RECORDS if x["shard"] not in external_per_contig]
     if missing:
         raise ValueError("joint_finalize is missing per-contig VCF shard(s): " + ", ".join(missing))
 
@@ -528,33 +654,28 @@ if WORKFLOW_STAGE in {"joint", "joint_shard", "full"}:
     os.makedirs(PER_CONTIG_DIR, exist_ok=True)
 
 ############################################
-# Console summary
+# Concise console summary (full details are written by rule preflight)
 ############################################
 
-print(f"Workflow stage: {WORKFLOW_STAGE}")
-print(f"Read layout: {READ_LAYOUT}")
-print(f"Ploidy: {PLOIDY}")
-
+print(f"SNaP v1.0.2 | stage={WORKFLOW_STAGE} | layout={READ_LAYOUT} | ploidy={PLOIDY}")
+print(
+    f"Reference: {len(SELECTED_REFERENCE_CONTIGS)}/{len(REFERENCE_CONTIGS)} sequences selected "
+    f"({REFERENCE_INTERVAL_MODE}); joint strategy={JOINT_SHARD_STRATEGY}, shards={len(SHARD_RECORDS)}"
+)
 if WORKFLOW_STAGE in {"preprocess", "full"}:
-    print(f"Batch ID: {BATCH_ID}")
-    print(f"Trimmomatic adapter: {TRIMMOMATIC_ADAPTER}")
-    print(f"Detected FASTQ units: {len(RAW_FASTQ_MAP)}")
-    print(f"Kept FASTQ units: {len(local_units)}")
-    print(f"Skipped FASTQ units: {len(skipped_units)}")
-    print("Biological samples represented locally:", len(set(UNIT_META[u]["sample"] for u in local_units)))
-
-if WORKFLOW_STAGE == "gvcf":
-    print(f"Biological samples entering HaplotypeCaller: {len(sample_names)}")
-    print(f"Marked BAM units entering sample merge: {sum(len(v) for v in joint_bams_by_sample.values())}")
-    print("Selected biological samples:", ", ".join(sample_names))
-if WORKFLOW_STAGE in {"joint", "joint_shard"}:
-    print(f"Single-sample gVCFs entering joint genotyping: {len(sample_names)}")
-    print(f"Active joint contigs: {len(ACTIVE_CONTIG_RECORDS)}")
-    if WORKFLOW_STAGE == "joint_shard":
-        print(f"Joint partition: {JOINT_PARTITION}")
-        print("Assigned contigs:", ", ".join(x["contig"] for x in ACTIVE_CONTIG_RECORDS))
-if WORKFLOW_STAGE == "joint_finalize":
-    print(f"Per-contig VCFs entering finalize: {len(external_per_contig)}")
+    print(
+        f"FASTQ: {len(local_units)} retained units / "
+        f"{len(set(UNIT_META[u]['sample'] for u in local_units))} biological samples; "
+        f"ignored intermediates={len(IGNORED_INTERMEDIATE_FASTQS)}"
+    )
+elif WORKFLOW_STAGE == "gvcf":
+    print(f"gVCF calling: {len(sample_names)} biological samples")
+elif WORKFLOW_STAGE in {"joint", "joint_shard"}:
+    extra = f", partition={JOINT_PARTITION}" if WORKFLOW_STAGE == "joint_shard" else ""
+    print(f"Joint genotyping: {len(sample_names)} samples, {len(ACTIVE_SHARD_RECORDS)} active shards{extra}")
+elif WORKFLOW_STAGE == "joint_finalize":
+    print(f"Joint finalize: {len(external_per_contig)} shard VCFs")
+print("Run target 'preflight' for the complete validation summary.")
 
 ############################################
 # FASTQ path helpers
@@ -582,7 +703,7 @@ def get_unit_sm(unit_key):
 
 
 def send_telegram(message):
-    if not TELEGRAM_READY:
+    if PREFLIGHT_ONLY or not TELEGRAM_READY:
         return
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -600,8 +721,9 @@ def send_telegram(message):
 
 
 onstart:
+    label = "SNaP preflight" if PREFLIGHT_ONLY else f"SNaP ({WORKFLOW_STAGE})"
     msg = (
-        f"[Snakemake] SNP pipeline ({WORKFLOW_STAGE}) started at "
+        f"[Snakemake] {label} started at "
         f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
     )
     print(msg)
@@ -609,7 +731,10 @@ onstart:
 
 
 onsuccess:
-    if WORKFLOW_STAGE == "preprocess":
+    label = "SNaP preflight" if PREFLIGHT_ONLY else f"SNaP ({WORKFLOW_STAGE})"
+    if PREFLIGHT_ONLY:
+        result_note = preflight_summary_path
+    elif WORKFLOW_STAGE == "preprocess":
         result_note = os.path.join(metadata_dir, f"{BATCH_ID}.units.tsv")
     elif WORKFLOW_STAGE == "gvcf":
         result_note = gvcf_dir
@@ -618,7 +743,7 @@ onsuccess:
     else:
         result_note = os.path.join(results_dir, "final_combined_filtered_snps.vcf.gz")
     msg = (
-        f"[Snakemake] SNP pipeline ({WORKFLOW_STAGE}) completed successfully at "
+        f"[Snakemake] {label} completed successfully at "
         f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
         f"Output: {result_note}"
     )
@@ -627,13 +752,116 @@ onsuccess:
 
 
 onerror:
+    label = "SNaP preflight" if PREFLIGHT_ONLY else f"SNaP ({WORKFLOW_STAGE})"
     msg = (
-        f"[Snakemake] SNP pipeline ({WORKFLOW_STAGE}) failed at "
+        f"[Snakemake] {label} failed at "
         f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
         f"Please check logs under: {log_dir}"
     )
     print(msg)
     send_telegram(msg)
+
+############################################
+# Preflight metadata / validation report
+############################################
+
+rule preflight:
+    output:
+        summary = preflight_summary_path,
+        reference = reference_metadata_path,
+        intervals = selected_intervals_path,
+        fastqs = fastq_metadata_path
+    run:
+        os.makedirs(metadata_dir, exist_ok=True)
+        with open(output.intervals, "w") as out:
+            for name, _ in SELECTED_REFERENCE_CONTIGS:
+                out.write(f"{name}\n")
+
+        with open(output.reference, "w") as out:
+            out.write("sequence\tlength\tselected\texclusion_reason\tshard\n")
+            for rec in REFERENCE_AUDIT:
+                shard = SHARD_BY_SEQUENCE.get(rec["sequence"], ".")
+                out.write(
+                    f"{rec['sequence']}\t{rec['length']}\t"
+                    f"{'TRUE' if rec['selected'] else 'FALSE'}\t"
+                    f"{rec['exclusion_reason']}\t{shard}\n"
+                )
+
+        with open(output.fastqs, "w") as out:
+            out.write("unit_key\tbiological_sample\traw_unit\tread_layout\tR1_or_SE\tR2\n")
+            for unit in local_units:
+                meta = UNIT_META[unit]
+                fq = UNIT_FASTQ_MAP[unit]
+                if READ_LAYOUT == "PE":
+                    r1, r2 = fq
+                else:
+                    r1, r2 = fq, "."
+                out.write(f"{unit}\t{meta['sample']}\t{meta['raw_unit']}\t{READ_LAYOUT}\t{r1}\t{r2}\n")
+
+        samples_local = sorted({UNIT_META[u]["sample"] for u in local_units})
+        sample_preview = []
+        for raw_unit in sorted(RAW_FASTQ_MAP)[:10]:
+            sample_preview.append(f"  {raw_unit} -> {get_sm_name(raw_unit)}")
+
+        with open(output.summary, "w") as out:
+            out.write("SNaP v1.0.2 preflight\n")
+            out.write("======================\n\n")
+            out.write(f"Stage: {WORKFLOW_STAGE}\n")
+            out.write(f"Read layout: {READ_LAYOUT}\n")
+            out.write(f"Ploidy: {PLOIDY}\n")
+            out.write(f"Platform: {platform.system()} {platform.machine()}\n")
+            out.write(f"Detected CPU threads: {DETECTED_CPU_THREADS}\n")
+            out.write(
+                "Detected physical memory: "
+                + (f"{DETECTED_MEMORY_MB / 1024:.1f} GiB\n" if DETECTED_MEMORY_MB else "unknown\n")
+            )
+            out.write("\nReference\n---------\n")
+            out.write(f"FASTA: {reference_dir}\n")
+            out.write(f"Sequences in FASTA: {len(REFERENCE_CONTIGS)}\n")
+            out.write(f"Total reference length: {REFERENCE_TOTAL_LENGTH:,} bp\n")
+            out.write(f"Interval mode: {REFERENCE_INTERVAL_MODE}\n")
+            out.write(f"Selected sequences: {len(SELECTED_REFERENCE_CONTIGS)}\n")
+            out.write(f"Excluded sequences: {len(REFERENCE_CONTIGS) - len(SELECTED_REFERENCE_CONTIGS)}\n")
+            out.write(f"Selected length: {SELECTED_REFERENCE_LENGTH:,} bp\n")
+            out.write(f"Joint sharding strategy: {JOINT_SHARD_STRATEGY}\n")
+            out.write(f"Global joint shards: {len(SHARD_RECORDS)}\n")
+            if WORKFLOW_STAGE in {"preprocess", "full"}:
+                out.write("\nFASTQ\n-----\n")
+                out.write("Supported extensions: .fastq.gz, .fq.gz, .fastq, .fq\n")
+                out.write(f"Detected raw units: {len(RAW_FASTQ_MAP)}\n")
+                out.write(f"Retained raw units: {len(local_units)}\n")
+                out.write(f"Biological samples: {len(samples_local)}\n")
+                out.write(f"Ignored intermediate FASTQs: {len(IGNORED_INTERMEDIATE_FASTQS)}\n")
+                raw_paths = []
+                for value in RAW_FASTQ_MAP.values():
+                    if isinstance(value, (tuple, list)):
+                        raw_paths.extend(value)
+                    else:
+                        raw_paths.append(value)
+                extension_counts = {}
+                for path in raw_paths:
+                    lower = str(path).lower()
+                    ext = next((x for x in SUPPORTED_FASTQ_EXTENSIONS if lower.endswith(x)), "unknown")
+                    extension_counts[ext] = extension_counts.get(ext, 0) + 1
+                if extension_counts:
+                    out.write("FASTQ extension counts: " + ", ".join(
+                        f"{ext}={extension_counts[ext]}" for ext in SUPPORTED_FASTQ_EXTENSIONS if ext in extension_counts
+                    ) + "\n")
+                out.write(f"sample_group_regex: {SAMPLE_GROUP_REGEX}\n")
+                if sample_preview:
+                    out.write("Sample parsing preview:\n" + "\n".join(sample_preview) + "\n")
+            if WORKFLOW_STAGE == "gvcf":
+                out.write(f"\nBiological samples entering HaplotypeCaller: {len(sample_names)}\n")
+            if WORKFLOW_STAGE in {"joint", "joint_shard"}:
+                out.write(f"\nSingle-sample gVCFs: {len(sample_names)}\n")
+                out.write(f"Active joint shards: {len(ACTIVE_SHARD_RECORDS)}\n")
+            if WORKFLOW_STAGE == "joint_finalize":
+                out.write(f"\nPer-shard VCFs available: {len(external_per_contig)}\n")
+            out.write("\nValidation: PASS\n")
+
+        print(Path(output.summary).read_text())
+        print(f"Preflight summary written to: {output.summary}")
+
 
 ############################################
 # Stage-aware targets
@@ -679,7 +907,7 @@ def final_variant_targets(wc):
 
 
 def per_contig_targets(records=None):
-    records = ACTIVE_CONTIG_RECORDS if records is None else records
+    records = ACTIVE_SHARD_RECORDS if records is None else records
     shards = [x["shard"] for x in records]
     return (
         expand(os.path.join(PER_CONTIG_DIR, "{shard}.vcf.gz"), shard=shards)
@@ -688,23 +916,24 @@ def per_contig_targets(records=None):
 
 
 def all_targets(wc):
+    preflight_files = [preflight_summary_path, reference_metadata_path, selected_intervals_path, fastq_metadata_path]
     if WORKFLOW_STAGE == "full":
-        return preprocess_targets(wc) + final_variant_targets(wc) + [os.path.join(metadata_dir, "full_inputs.tsv")]
+        return preflight_files + preprocess_targets(wc) + final_variant_targets(wc) + [os.path.join(metadata_dir, "full_inputs.tsv")]
     if WORKFLOW_STAGE == "preprocess":
-        return preprocess_targets(wc)
+        return preflight_files + preprocess_targets(wc)
     if WORKFLOW_STAGE == "gvcf":
-        return (expand(os.path.join(gvcf_dir, "{sm}.g.vcf.gz"), sm=sample_names)
+        return (preflight_files + expand(os.path.join(gvcf_dir, "{sm}.g.vcf.gz"), sm=sample_names)
                 + expand(os.path.join(gvcf_dir, "{sm}.g.vcf.gz.tbi"), sm=sample_names)
                 + [os.path.join(metadata_dir, "gvcf_inputs.tsv")])
     if WORKFLOW_STAGE == "joint_shard":
-        return per_contig_targets() + [
+        return preflight_files + per_contig_targets() + [
             os.path.join(metadata_dir, "joint_shard_inputs.tsv"),
             os.path.join(metadata_dir, "joint_contigs.tsv"),
             os.path.join(metadata_dir, "genomicsdb.sample_map.tsv"),
         ]
     if WORKFLOW_STAGE == "joint_finalize":
-        return final_variant_targets(wc) + [os.path.join(metadata_dir, "joint_finalize_inputs.tsv")]
-    return final_variant_targets(wc) + [os.path.join(metadata_dir, f"{WORKFLOW_STAGE}_inputs.tsv")]
+        return preflight_files + final_variant_targets(wc) + [os.path.join(metadata_dir, "joint_finalize_inputs.tsv")]
+    return preflight_files + final_variant_targets(wc) + [os.path.join(metadata_dir, f"{WORKFLOW_STAGE}_inputs.tsv")]
 
 
 rule all:
@@ -776,7 +1005,8 @@ if WORKFLOW_STAGE == "joint_shard":
 if WORKFLOW_STAGE in {"preprocess", "full"}:
     rule trim_fastq_se:
         input:
-            fq = se_fastq
+            fq = se_fastq,
+            preflight = preflight_summary_path
         output:
             fq = os.path.join(trim_dir, "{unit}.trim.fastq.gz")
         params:
@@ -787,6 +1017,8 @@ if WORKFLOW_STAGE in {"preprocess", "full"}:
         benchmark:
             os.path.join(benchmark_dir, "{unit}.trimmomatic_se.txt")
         threads: TRIMMOMATIC_THREADS
+        resources:
+            mem_mb = TRIMMOMATIC_MEM_MB
         shell:
             r"""
             {TRIMMOMATIC:q} SE {TRIMMOMATIC_PHRED} -threads {threads} \
@@ -801,7 +1033,8 @@ if WORKFLOW_STAGE in {"preprocess", "full"}:
     rule trim_fastq_pe:
         input:
             R1 = pe_r1,
-            R2 = pe_r2
+            R2 = pe_r2,
+            preflight = preflight_summary_path
         output:
             R1P = os.path.join(trim_dir, "{unit}_R1_paired.trim.fastq.gz"),
             R1U = os.path.join(trim_dir, "{unit}_R1_unpaired.trim.fastq.gz"),
@@ -815,6 +1048,8 @@ if WORKFLOW_STAGE in {"preprocess", "full"}:
         benchmark:
             os.path.join(benchmark_dir, "{unit}.trimmomatic_pe.txt")
         threads: TRIMMOMATIC_THREADS
+        resources:
+            mem_mb = TRIMMOMATIC_MEM_MB
         shell:
             r"""
             {TRIMMOMATIC:q} PE {TRIMMOMATIC_PHRED} -threads {threads} \
@@ -845,6 +1080,8 @@ if WORKFLOW_STAGE in {"preprocess", "full"}:
         benchmark:
             os.path.join(benchmark_dir, "{unit}.bwa.txt")
         threads: BWA_THREADS
+        resources:
+            mem_mb = BWA_MEM_MB
         shell:
             r"""
             {BWA:q} mem -M -t {threads} -R {params.rg} {params.reference:q} {input.reads:q} \
@@ -868,6 +1105,8 @@ if WORKFLOW_STAGE in {"preprocess", "full"}:
         benchmark:
             os.path.join(benchmark_dir, "{unit}.sort_index.txt")
         threads: SAMTOOLS_SORT_THREADS
+        resources:
+            mem_mb = SORT_MEM_MB
         shell:
             r"""
             {SAMTOOLS:q} sort -@ {threads} {input:q} -o {output.bam:q} > {log:q} 2>&1
@@ -881,7 +1120,7 @@ if WORKFLOW_STAGE in {"preprocess", "full"}:
             bam = os.path.join(sorted_dir, "{unit}.sorted.bam"),
             bai = os.path.join(sorted_dir, "{unit}.sorted.bam.bai")
         params:
-            java_option = MARKDUP_JAVA_OPTS
+            java_option = lambda wc, resources: java_options_from_mem(resources.mem_mb, MARKDUP_JAVA_EXTRA)
         output:
             bam = os.path.join(marked_dir, "{unit}.marked.bam"),
             bai = os.path.join(marked_dir, "{unit}.marked.bam.bai"),
@@ -890,6 +1129,8 @@ if WORKFLOW_STAGE in {"preprocess", "full"}:
             os.path.join(log_dir, "{unit}.markdup.log")
         benchmark:
             os.path.join(benchmark_dir, "{unit}.markdup.txt")
+        resources:
+            mem_mb = MARKDUP_MEM_MB
         shell:
             r"""
             # RAD-seq/DArT-seq: identical coordinates can represent genuine
@@ -940,6 +1181,8 @@ if WORKFLOW_STAGE in {"gvcf", "full"}:
             os.path.join(log_dir, "{sm}.merge_marked_bam.log")
         benchmark:
             os.path.join(benchmark_dir, "{sm}.merge_marked_bam.txt")
+        resources:
+            mem_mb = MERGE_MEM_MB
         run:
             bam_list = list(input.bams)
             shell("{SAMTOOLS:q} quickcheck -v {input.bams:q} > {log:q} 2>&1")
@@ -962,9 +1205,11 @@ if WORKFLOW_STAGE in {"gvcf", "full"}:
         input:
             bam = os.path.join(merged_dir, "{sm}.merged.bam"),
             bai = os.path.join(merged_dir, "{sm}.merged.bam.bai"),
-            reference_files = REFERENCE_INPUTS
+            reference_files = REFERENCE_INPUTS,
+            preflight = preflight_summary_path,
+            intervals = selected_intervals_path
         params:
-            java_option = HC_JAVA_OPTS,
+            java_option = lambda wc, resources: java_options_from_mem(resources.mem_mb, HC_JAVA_EXTRA),
             reference = reference_dir,
             ploidy = PLOIDY,
             min_mq = MIN_MAPPING_QUALITY
@@ -975,6 +1220,8 @@ if WORKFLOW_STAGE in {"gvcf", "full"}:
         benchmark:
             os.path.join(benchmark_dir, "{sm}.haplotypecaller.txt")
         threads: HC_THREADS
+        resources:
+            mem_mb = HC_MEM_MB
         shell:
             r"""
             # HaplotypeCaller normally applies NotDuplicateReadFilter. Disable that
@@ -985,6 +1232,7 @@ if WORKFLOW_STAGE in {"gvcf", "full"}:
                 --sample-ploidy {params.ploidy} \
                 --disable-read-filter NotDuplicateReadFilter \
                 --minimum-mapping-quality {params.min_mq} \
+                -L {input.intervals:q} \
                 --native-pair-hmm-threads {threads} \
                 -ERC GVCF \
                 --create-output-variant-index false \
@@ -1007,12 +1255,16 @@ if WORKFLOW_STAGE in {"gvcf", "full"}:
             """
 
 ############################################
-# Joint genotyping: GenomicsDB per reference contig
+# Joint genotyping: GenomicsDB per deterministic shard
 ############################################
 
 
-def contig_for_shard(wc):
-    return CONTIG_BY_SHARD[wc.shard]["contig"]
+def sequences_for_shard(wc):
+    return SHARD_BY_ID[wc.shard]["sequences"]
+
+
+def interval_args_for_shard(wc):
+    return " ".join(f"-L {shlex.quote(seq)}" for seq in sequences_for_shard(wc))
 
 
 def source_per_contig_vcf(wc):
@@ -1027,7 +1279,8 @@ if WORKFLOW_STAGE in {"joint", "joint_shard", "full"}:
             gvcfs = list(external_gvcfs.values()),
             tbis = [p + ".tbi" for p in external_gvcfs.values()],
             ref = reference_dir,
-            reference_files = REFERENCE_INPUTS
+            reference_files = REFERENCE_INPUTS,
+            preflight = preflight_summary_path
         output:
             sample_map = os.path.join(metadata_dir, "genomicsdb.sample_map.tsv"),
             contigs = os.path.join(metadata_dir, "joint_contigs.tsv")
@@ -1036,10 +1289,12 @@ if WORKFLOW_STAGE in {"joint", "joint_shard", "full"}:
                 for sm in sorted(external_gvcfs):
                     out.write(f"{sm}\t{external_gvcfs[sm]}\n")
             with open(output.contigs, "w") as out:
-                out.write("shard\tcontig\tlength\tpartition\n")
-                for rec in ACTIVE_CONTIG_RECORDS:
-                    partition = CONTIG_ASSIGNMENT.get(rec["contig"], "ALL")
-                    out.write(f"{rec['shard']}\t{rec['contig']}\t{rec['length']}\t{partition}\n")
+                out.write("shard\tsequences\ttotal_length\tpartition\n")
+                for rec in ACTIVE_SHARD_RECORDS:
+                    partition = SHARD_PARTITION.get(rec["shard"], "ALL")
+                    out.write(
+                        f"{rec['shard']}\t{','.join(rec['sequences'])}\t{rec['length']}\t{partition}\n"
+                    )
 
 
     rule genomicsdb_import:
@@ -1053,8 +1308,8 @@ if WORKFLOW_STAGE in {"joint", "joint_shard", "full"}:
         output:
             directory(os.path.join(GENOMICSDB_DIR, "{shard}"))
         params:
-            java_option = GENOMICSDB_JAVA_OPTS,
-            contig = contig_for_shard,
+            java_option = lambda wc, resources: java_options_from_mem(resources.mem_mb, GENOMICSDB_JAVA_EXTRA),
+            interval_args = interval_args_for_shard,
             batch_size = GENOMICSDB_BATCH_SIZE,
             reader_threads = GENOMICSDB_READER_THREADS
         resources:
@@ -1071,7 +1326,7 @@ if WORKFLOW_STAGE in {"joint", "joint_shard", "full"}:
             rm -rf {output:q}
             {GATK:q} --java-options "{params.java_option}" GenomicsDBImport \
                 -R {input.ref:q} \
-                -L {params.contig:q} \
+                {params.interval_args} \
                 --sample-name-map {input.sample_map:q} \
                 --validate-sample-name-map true \
                 --batch-size {params.batch_size} \
@@ -1090,8 +1345,8 @@ if WORKFLOW_STAGE in {"joint", "joint_shard", "full"}:
             vcf = os.path.join(PER_CONTIG_DIR, "{shard}.vcf.gz"),
             tbi = os.path.join(PER_CONTIG_DIR, "{shard}.vcf.gz.tbi")
         params:
-            java_option = GENOTYPE_JAVA_OPTS,
-            contig = contig_for_shard,
+            java_option = lambda wc, resources: java_options_from_mem(resources.mem_mb, GENOTYPE_JAVA_EXTRA),
+            interval_args = interval_args_for_shard,
             db_uri = lambda wc: "gendb://" + os.path.join(GENOMICSDB_DIR, wc.shard)
         resources:
             joint_jobs = 1,
@@ -1105,7 +1360,7 @@ if WORKFLOW_STAGE in {"joint", "joint_shard", "full"}:
             {GATK:q} --java-options "{params.java_option}" GenotypeGVCFs \
                 -R {input.ref:q} \
                 -V {params.db_uri:q} \
-                -L {params.contig:q} \
+                {params.interval_args} \
                 --max-alternate-alleles {MAX_ALTERNATE_ALLELES} \
                 --max-genotype-count {MAX_GENOTYPE_COUNT} \
                 --create-output-variant-index true \
@@ -1117,38 +1372,48 @@ if WORKFLOW_STAGE in {"joint", "joint_shard", "full"}:
 if WORKFLOW_STAGE == "joint_finalize":
     rule write_finalize_manifest:
         input:
-            vcfs = lambda wc: [external_per_contig[x["shard"]] for x in CONTIG_RECORDS],
-            tbis = lambda wc: [external_per_contig[x["shard"]] + ".tbi" for x in CONTIG_RECORDS]
+            preflight = preflight_summary_path,
+            vcfs = lambda wc: [external_per_contig[x["shard"]] for x in SHARD_RECORDS],
+            tbis = lambda wc: [external_per_contig[x["shard"]] + ".tbi" for x in SHARD_RECORDS]
         output:
             os.path.join(metadata_dir, "joint_finalize_inputs.tsv")
         run:
             with open(output[0], "w") as out:
-                out.write("shard\tcontig\tlength\tvcf\n")
-                for rec in CONTIG_RECORDS:
-                    out.write(f"{rec['shard']}\t{rec['contig']}\t{rec['length']}\t{external_per_contig[rec['shard']]}\n")
+                out.write("shard\tsequences\ttotal_length\tvcf\n")
+                for rec in SHARD_RECORDS:
+                    out.write(
+                        f"{rec['shard']}\t{','.join(rec['sequences'])}\t{rec['length']}\t"
+                        f"{external_per_contig[rec['shard']]}\n"
+                    )
 
 
 if WORKFLOW_STAGE in {"joint", "full", "joint_finalize"}:
     rule concat_joint_vcfs:
         input:
+            preflight = preflight_summary_path,
             vcfs = lambda wc: (
-                [external_per_contig[x["shard"]] for x in CONTIG_RECORDS]
+                [external_per_contig[x["shard"]] for x in SHARD_RECORDS]
                 if WORKFLOW_STAGE == "joint_finalize"
-                else [os.path.join(PER_CONTIG_DIR, x["shard"] + ".vcf.gz") for x in CONTIG_RECORDS]
+                else [os.path.join(PER_CONTIG_DIR, x["shard"] + ".vcf.gz") for x in SHARD_RECORDS]
             ),
             tbis = lambda wc: (
-                [external_per_contig[x["shard"]] + ".tbi" for x in CONTIG_RECORDS]
+                [external_per_contig[x["shard"]] + ".tbi" for x in SHARD_RECORDS]
                 if WORKFLOW_STAGE == "joint_finalize"
-                else [os.path.join(PER_CONTIG_DIR, x["shard"] + ".vcf.gz.tbi") for x in CONTIG_RECORDS]
+                else [os.path.join(PER_CONTIG_DIR, x["shard"] + ".vcf.gz.tbi") for x in SHARD_RECORDS]
             )
         output:
             vcf = os.path.join(results_dir, "allsample.vcf.gz"),
             tbi = os.path.join(results_dir, "allsample.vcf.gz.tbi")
         log:
             os.path.join(log_dir, "concat_joint_vcfs.log")
+        resources:
+            mem_mb = BCFTOOLS_MEM_MB
         shell:
             r"""
-            {BCFTOOLS:q} concat -a -Oz -o {output.vcf:q} {input.vcfs:q} > {log:q} 2>&1
+            # Balanced shards can contain non-adjacent reference sequences. Concatenate
+            # all disjoint shard VCFs, then sort using the VCF header/reference order.
+            {BCFTOOLS:q} concat -a -Ou {input.vcfs:q} 2> {log:q} \
+            | {BCFTOOLS:q} sort -Oz -o {output.vcf:q} - >> {log:q} 2>&1
             {BCFTOOLS:q} index -t --force {output.vcf:q} >> {log:q} 2>&1
             """
 
