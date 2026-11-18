@@ -23,6 +23,416 @@ SNaP 是以 Snakemake 建立的 RAD-seq / ddRAD-seq / DArT-seq SNP calling workf
 - `scripts/run_snap.sh` 每次執行建立完整 run history/log。
 - 最終 SNP ID 維持 `CHROM_POS`，例如 `LG1_123456`。
 
+
+## 快速索引
+
+- [平台支援](#1-平台支援)
+- [建立 Conda 環境](#2-建立-conda-環境)
+- [Reference genome 準備](#3-reference-genome-準備)
+- [FASTQ input](#4-fastq-input)
+- [`sample_group_regex`](#5-sample_group_regex)
+- [Reference interval selection](#6-reference-interval-selection)
+- [Joint sharding](#7-joint-sharding)
+- [Resource profiles](#8-resource-profiles)
+- [Preflight](#9-preflight)
+- [簡潔 dry-run](#10-簡潔-dry-run)
+- [執行歷史與 log](#11-每次執行自動保存歷史-log)
+- [Workflow stages](#121-preprocess)
+  - [`preprocess`](#121-preprocess)
+  - [`gvcf`](#122-gvcf)
+  - [`joint`](#123-joint)
+  - [`joint_shard`](#124-joint_shard)
+  - [`joint_finalize`](#125-joint_finalize)
+  - [`full`](#126-full)
+- [Config 主要參數](#13-config-主要參數)
+- [Telegram 通知](#14-telegram-通知)
+- [Final SNP ID](#15-final-snp-id)
+- [中斷、lock 與 recovery](#16-中斷lock-與-recovery)
+- [Debugging](#17-debugging)
+
+---
+
+## 快速開始：在一般桌機或筆電執行 Full stage
+
+這個 Quick Start 適合希望直接從 FASTQ 執行到最終 SNP/INDEL VCF 的使用者。
+
+Full stage 會執行：
+
+```text
+FASTQ
+→ Trimmomatic
+→ BWA-MEM
+→ samtools sort/index
+→ MarkDuplicates
+→ merge technical units
+→ HaplotypeCaller GVCF
+→ GenomicsDBImport
+→ GenotypeGVCFs
+→ SNP / INDEL selection
+→ CHROM_POS SNP IDs
+→ hard filtering
+→ final VCF
+```
+
+### Step 1 — 進入 SNaP 專案並建立環境
+
+第一次使用：
+
+```bash
+cd /path/to/snap-snakemake
+
+conda env create -f environment.yaml
+conda activate snap-snakemake
+```
+
+如果 `snap-snakemake` Conda environment 已存在：
+
+```bash
+conda env update \
+  -n snap-snakemake \
+  -f environment.yaml \
+  --prune
+
+conda activate snap-snakemake
+```
+
+確認主要工具：
+
+```bash
+snakemake --version
+bwa 2>&1 | head
+samtools --version
+bcftools --version
+gatk --version
+```
+
+### Step 2 — 準備 reference genome
+
+假設 reference genome 為：
+
+```bash
+REF=/absolute/path/to/reference.fa
+```
+
+建立必要 index：
+
+```bash
+bwa index "$REF"
+samtools faidx "$REF"
+gatk CreateSequenceDictionary \
+  -R "$REF" \
+  -O "${REF%.*}.dict"
+```
+
+`full` stage 需要 FASTA、`.fai`、GATK sequence dictionary 與 BWA indexes。
+
+### Step 3 — 準備 FASTQ
+
+SNaP 支援：
+
+```text
+.fastq.gz
+.fq.gz
+.fastq
+.fq
+```
+
+PE 範例：
+
+```text
+SM001_R1.fastq.gz
+SM001_R2.fastq.gz
+SM002_R1.fastq.gz
+SM002_R2.fastq.gz
+```
+
+預設：
+
+```yaml
+sample_group_regex: '^((?:SM)[0-9]{3})'
+```
+
+例如：
+
+```text
+SM001_L001_R1.fastq.gz → SM001
+SM001_L002_R1.fastq.gz → SM001
+```
+
+如果 sample naming 不同，請參考 [`sample_group_regex`](#5-sample_group_regex) 章節修改。
+
+### Step 4 — 建立 Full-stage config
+
+先複製完整範例：
+
+```bash
+cp configs/config.full.example.yaml config.full.yaml
+```
+
+再編輯：
+
+```bash
+nano config.full.yaml
+```
+
+一般使用者至少需要確認：
+
+```yaml
+workflow_stage: full
+
+read_layout: PE
+batch_id: batch1
+ploidy: 2
+
+project_dir: /absolute/path/to/snap_output
+fastq_dir: /absolute/path/to/fastq
+reference: /absolute/path/to/reference.fa
+
+sample_group_regex: '^((?:SM)[0-9]{3})'
+
+reference_intervals:
+  mode: all
+
+joint_sharding:
+  strategy: contig
+  shards: null
+
+telegram:
+  enabled: false
+  bot_token: ''
+  chat_id: ''
+```
+
+其中：
+
+- `read_layout`: `SE` 或 `PE`
+- `ploidy`: 依物種設定，例如 diploid = `2`、hexaploid = `6`
+- `project_dir`: 分析結果輸出位置
+- `fastq_dir`: raw FASTQ 所在資料夾
+- `reference`: reference FASTA
+- `sample_group_regex`: biological sample ID 解析規則
+- `reference_intervals.mode: all`: 預設分析全部 reference sequences
+- `joint_sharding.strategy: contig`: 預設一條 selected sequence 一個 joint shard
+
+其他進階參數可以先保留 `config.full.example.yaml` 的預設值。
+
+### Step 4.1 — 可選：快速設定 Telegram 通知
+
+如果希望 workflow 開始、成功或失敗時收到 Telegram 通知，先建立 Telegram Bot，取得：
+
+- `bot_token`
+- `chat_id`
+
+可以直接寫入本機使用的 config：
+
+```yaml
+telegram:
+  enabled: true
+  bot_token: 'YOUR_BOT_TOKEN'
+  chat_id: 'YOUR_CHAT_ID'
+```
+
+如果不使用 Telegram：
+
+```yaml
+telegram:
+  enabled: false
+  bot_token: ''
+  chat_id: ''
+```
+
+不要把含真實 credentials 的 local config commit 到 GitHub。
+
+更建議使用環境變數，避免把 token 寫入 config：
+
+```bash
+export TG_BOT_TOKEN='YOUR_BOT_TOKEN'
+export TG_CHAT_ID='YOUR_CHAT_ID'
+```
+
+config 保持：
+
+```yaml
+telegram:
+  enabled: true
+  bot_token: ''
+  chat_id: ''
+```
+
+SNaP 會優先使用 config 中的值；config 為空時，再使用 `TG_BOT_TOKEN` 與 `TG_CHAT_ID`。若 `enabled: true` 但 credentials 不完整，SNaP 只會顯示警告並略過通知，不會因此中止 workflow。
+
+下一步的 preflight 也會協助確認 Telegram 設定是否可被正確解析。
+
+### Step 5 — 選擇硬體 profile
+
+SNaP 提供三種 profile：
+
+| Profile | 建議硬體 | 用途 |
+|---|---|---|
+| `low-memory` | 約 16 GiB RAM、4–8 CPU threads | 筆電、一般桌機、安全優先 |
+| `workstation` | 約 32–64 GiB RAM、8–16 threads | 一般研究工作站 |
+| `server` | ≥128 GiB RAM | 高記憶體 server |
+
+如果不確定，**先使用 `low-memory`**。
+
+不要因為電腦有很多 CPU cores 就直接使用：
+
+```bash
+snakemake --cores all
+```
+
+記憶體通常比 CPU core 數更容易成為 SNP calling workflow 的限制因素。
+
+### Step 6 — 執行 Preflight
+
+```bash
+bash scripts/run_snap.sh \
+  --config config.full.yaml \
+  --profile low-memory \
+  --mode preflight
+```
+
+Preflight 會檢查 config、FASTQ、PE R1/R2 pairing、`sample_group_regex`、reference indexes、reference interval selection、joint sharding、resource configuration 與 Telegram 設定。
+
+如果 preflight 失敗，應先修正錯誤，不要直接進行正式分析。
+
+### Step 7 — 執行簡潔 Dry-run
+
+```bash
+bash scripts/run_snap.sh \
+  --config config.full.yaml \
+  --profile low-memory \
+  --mode dry-run
+```
+
+Dry-run 只建立與檢查 workflow DAG，不會真正執行分析。
+
+只有除錯時才需要完整 shell commands：
+
+```bash
+snakemake \
+  -s Snakefile \
+  --configfile config.full.yaml \
+  --workflow-profile profiles/low-memory \
+  --dry-run \
+  --printshellcmds
+```
+
+### Step 8 — 正式執行 Full stage
+
+一般電腦 / low-memory：
+
+```bash
+bash scripts/run_snap.sh \
+  --config config.full.yaml \
+  --profile low-memory \
+  --mode run
+```
+
+32–64 GiB RAM 工作站：
+
+```bash
+bash scripts/run_snap.sh \
+  --config config.full.yaml \
+  --profile workstation \
+  --mode run
+```
+
+高記憶體 server：
+
+```bash
+bash scripts/run_snap.sh \
+  --config config.full.yaml \
+  --profile server \
+  --mode run
+```
+
+### Step 9 — 查看執行紀錄
+
+每次透過 `run_snap.sh` 執行都會建立：
+
+```text
+<project_dir>/logs/runs/YYYY-MM-DD_HHMMSS/
+```
+
+最新一次執行：
+
+```bash
+less /absolute/path/to/snap_output/logs/runs/latest/run.log
+```
+
+每個 run 會保存：
+
+```text
+run.log
+command.txt
+config.snapshot.yaml
+preflight_summary.txt
+environment.txt
+git_version.txt
+run_metadata.tsv
+```
+
+因此分析結束或失敗後，可以回頭確認使用的 config、SNaP Git commit/tag、Conda environment、執行 command、Snakemake progress、error 與 exit status。
+
+### Step 10 — 確認最終輸出
+
+主要輸出：
+
+```text
+<project_dir>/results/final_combined_filtered_snps.vcf.gz
+<project_dir>/results/final_combined_filtered_snps.vcf.gz.tbi
+<project_dir>/results/final_combined_filtered_indels.vcf.gz
+<project_dir>/results/final_combined_filtered_indels.vcf.gz.tbi
+```
+
+SNP ID 格式為 `CHROM_POS`，例如：
+
+```text
+LG1_123456
+chr05_987654
+```
+
+快速查看：
+
+```bash
+bcftools view \
+  -H \
+  /absolute/path/to/snap_output/results/final_combined_filtered_snps.vcf.gz \
+  | head
+```
+
+### 最短版 Full-stage SOP
+
+已完成 Conda environment、reference indexing 與 `config.full.yaml` 設定後，一般使用者只需要依序執行：
+
+```bash
+conda activate snap-snakemake
+```
+
+```bash
+bash scripts/run_snap.sh \
+  --config config.full.yaml \
+  --profile low-memory \
+  --mode preflight
+```
+
+```bash
+bash scripts/run_snap.sh \
+  --config config.full.yaml \
+  --profile low-memory \
+  --mode dry-run
+```
+
+```bash
+bash scripts/run_snap.sh \
+  --config config.full.yaml \
+  --profile low-memory \
+  --mode run
+```
+
+若機器有 32–64 GiB RAM，可以把三個 wrapper command 中的 `low-memory` 改成 `workstation`。
+
 ---
 
 ## 1. 平台支援

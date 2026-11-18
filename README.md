@@ -22,6 +22,375 @@ Current version: **v1.0.2**
 - Run-level history/logging through `scripts/run_snap.sh`.
 - Final SNP IDs remain `CHROM_POS` (e.g. `LG1_123456`).
 
+
+## Quick navigation
+
+- [Installation](#1-installation)
+- [Prepare the reference genome](#2-prepare-the-reference-genome)
+- [FASTQ inputs](#3-fastq-inputs)
+- [Biological sample parsing](#4-biological-sample-parsing)
+- [Reference interval selection](#5-reference-interval-selection)
+- [Joint sharding](#6-joint-sharding)
+- [Resource profiles](#7-resource-profiles)
+- [Preflight, dry-run, and execution](#8-preflight-dry-run-and-execution)
+- [Run history and logs](#9-run-history-and-logs)
+- [Workflow stages](#10-stages)
+- [Main configuration keys](#11-main-configuration-keys)
+- [Telegram](#12-telegram)
+- [SNP IDs and outputs](#13-snp-ids-and-outputs)
+- [Lock and recovery](#14-lockrecovery)
+
+---
+
+## Quick Start: Full stage on a desktop or laptop
+
+Use this guide to run SNaP from raw FASTQ files to the final SNP/INDEL VCF on a single computer.
+
+The Full stage performs:
+
+```text
+FASTQ
+→ Trimmomatic
+→ BWA-MEM
+→ samtools sort/index
+→ MarkDuplicates
+→ merge technical units
+→ HaplotypeCaller GVCF
+→ GenomicsDBImport
+→ GenotypeGVCFs
+→ SNP / INDEL selection
+→ CHROM_POS SNP IDs
+→ hard filtering
+→ final VCF
+```
+
+### Step 1 — Enter the SNaP repository and create the environment
+
+For the first installation:
+
+```bash
+cd /path/to/snap-snakemake
+
+conda env create -f environment.yaml
+conda activate snap-snakemake
+```
+
+To update an existing environment:
+
+```bash
+conda env update \
+  -n snap-snakemake \
+  -f environment.yaml \
+  --prune
+
+conda activate snap-snakemake
+```
+
+Check the main tools:
+
+```bash
+snakemake --version
+bwa 2>&1 | head
+samtools --version
+bcftools --version
+gatk --version
+```
+
+### Step 2 — Prepare the reference genome
+
+```bash
+REF=/absolute/path/to/reference.fa
+```
+
+Create the required indexes:
+
+```bash
+bwa index "$REF"
+samtools faidx "$REF"
+gatk CreateSequenceDictionary \
+  -R "$REF" \
+  -O "${REF%.*}.dict"
+```
+
+The Full stage requires the FASTA, `.fai`, GATK sequence dictionary, and BWA indexes.
+
+### Step 3 — Prepare FASTQ files
+
+Supported extensions:
+
+```text
+.fastq.gz
+.fq.gz
+.fastq
+.fq
+```
+
+PE example:
+
+```text
+SM001_R1.fastq.gz
+SM001_R2.fastq.gz
+SM002_R1.fastq.gz
+SM002_R2.fastq.gz
+```
+
+The default biological-sample parser is:
+
+```yaml
+sample_group_regex: '^((?:SM)[0-9]{3})'
+```
+
+For example:
+
+```text
+SM001_L001_R1.fastq.gz → SM001
+SM001_L002_R1.fastq.gz → SM001
+```
+
+Modify `sample_group_regex` if your sample naming scheme differs.
+
+### Step 4 — Create a Full-stage config
+
+Copy the complete example:
+
+```bash
+cp configs/config.full.example.yaml config.full.yaml
+```
+
+Edit it:
+
+```bash
+nano config.full.yaml
+```
+
+At minimum, review:
+
+```yaml
+workflow_stage: full
+
+read_layout: PE
+batch_id: batch1
+ploidy: 2
+
+project_dir: /absolute/path/to/snap_output
+fastq_dir: /absolute/path/to/fastq
+reference: /absolute/path/to/reference.fa
+
+sample_group_regex: '^((?:SM)[0-9]{3})'
+
+reference_intervals:
+  mode: all
+
+joint_sharding:
+  strategy: contig
+  shards: null
+
+telegram:
+  enabled: false
+  bot_token: ''
+  chat_id: ''
+```
+
+Other advanced options can initially remain at the values supplied in `config.full.example.yaml`.
+
+### Step 4.1 — Optional: Enable Telegram notifications
+
+To receive Telegram notifications when the workflow starts, succeeds, or fails, create a Telegram Bot and obtain its `bot_token` and your target `chat_id`.
+
+You can place them directly in the local config:
+
+```yaml
+telegram:
+  enabled: true
+  bot_token: 'YOUR_BOT_TOKEN'
+  chat_id: 'YOUR_CHAT_ID'
+```
+
+To disable Telegram:
+
+```yaml
+telegram:
+  enabled: false
+  bot_token: ''
+  chat_id: ''
+```
+
+Do not commit local configuration files containing real credentials to GitHub.
+
+A safer alternative is to use environment variables:
+
+```bash
+export TG_BOT_TOKEN='YOUR_BOT_TOKEN'
+export TG_CHAT_ID='YOUR_CHAT_ID'
+```
+
+and keep the config as:
+
+```yaml
+telegram:
+  enabled: true
+  bot_token: ''
+  chat_id: ''
+```
+
+SNaP uses values supplied in the config first and falls back to `TG_BOT_TOKEN` and `TG_CHAT_ID` when the config values are empty. If Telegram is enabled but credentials are unavailable, SNaP prints a warning and skips notifications rather than terminating the workflow.
+
+The next preflight step also verifies whether the Telegram configuration can be resolved.
+
+### Step 5 — Choose a resource profile
+
+| Profile | Recommended hardware | Typical use |
+|---|---|---|
+| `low-memory` | ~16 GiB RAM, 4–8 CPU threads | Laptop or ordinary desktop |
+| `workstation` | ~32–64 GiB RAM, 8–16 threads | Research workstation |
+| `server` | ≥128 GiB RAM | High-memory server |
+
+If unsure, start with `low-memory`.
+
+Avoid starting with:
+
+```bash
+snakemake --cores all
+```
+
+for a memory-intensive variant-calling workflow.
+
+### Step 6 — Run preflight
+
+```bash
+bash scripts/run_snap.sh \
+  --config config.full.yaml \
+  --profile low-memory \
+  --mode preflight
+```
+
+Fix any reported input, reference, sample-parsing, interval, sharding, resource, or Telegram configuration errors before continuing.
+
+### Step 7 — Run a concise dry-run
+
+```bash
+bash scripts/run_snap.sh \
+  --config config.full.yaml \
+  --profile low-memory \
+  --mode dry-run
+```
+
+This validates the DAG without executing the analysis.
+
+For debugging only:
+
+```bash
+snakemake \
+  -s Snakefile \
+  --configfile config.full.yaml \
+  --workflow-profile profiles/low-memory \
+  --dry-run \
+  --printshellcmds
+```
+
+### Step 8 — Run the Full stage
+
+For a low-memory computer:
+
+```bash
+bash scripts/run_snap.sh \
+  --config config.full.yaml \
+  --profile low-memory \
+  --mode run
+```
+
+For a 32–64 GiB workstation:
+
+```bash
+bash scripts/run_snap.sh \
+  --config config.full.yaml \
+  --profile workstation \
+  --mode run
+```
+
+For a high-memory server:
+
+```bash
+bash scripts/run_snap.sh \
+  --config config.full.yaml \
+  --profile server \
+  --mode run
+```
+
+### Step 9 — Inspect run history
+
+Each wrapper invocation creates:
+
+```text
+<project_dir>/logs/runs/YYYY-MM-DD_HHMMSS/
+```
+
+Inspect the latest run:
+
+```bash
+less /absolute/path/to/snap_output/logs/runs/latest/run.log
+```
+
+The run directory records the command, config snapshot, environment, Git version, preflight summary, Snakemake output, and exit status.
+
+### Step 10 — Check the final outputs
+
+Primary outputs:
+
+```text
+<project_dir>/results/final_combined_filtered_snps.vcf.gz
+<project_dir>/results/final_combined_filtered_snps.vcf.gz.tbi
+<project_dir>/results/final_combined_filtered_indels.vcf.gz
+<project_dir>/results/final_combined_filtered_indels.vcf.gz.tbi
+```
+
+SNP IDs follow `CHROM_POS`, for example:
+
+```text
+LG1_123456
+chr05_987654
+```
+
+Inspect the final SNP VCF:
+
+```bash
+bcftools view \
+  -H \
+  /absolute/path/to/snap_output/results/final_combined_filtered_snps.vcf.gz \
+  | head
+```
+
+### Minimal Full-stage SOP
+
+Once the environment, reference indexes, and `config.full.yaml` are ready:
+
+```bash
+conda activate snap-snakemake
+```
+
+```bash
+bash scripts/run_snap.sh \
+  --config config.full.yaml \
+  --profile low-memory \
+  --mode preflight
+```
+
+```bash
+bash scripts/run_snap.sh \
+  --config config.full.yaml \
+  --profile low-memory \
+  --mode dry-run
+```
+
+```bash
+bash scripts/run_snap.sh \
+  --config config.full.yaml \
+  --profile low-memory \
+  --mode run
+```
+
+If the computer has 32–64 GiB RAM, replace `low-memory` with `workstation` in the three wrapper commands above.
+
 ## 1. Installation
 
 Create the stable environment name:
