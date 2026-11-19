@@ -1,90 +1,98 @@
-# SNaP v1.0.3 validation
+# SNaP v1.0.4-rc1 validation
 
-This file records static and wrapper-level validation performed for the v1.0.3 patch release.
+This file records static and wrapper-level validation for the v1.0.4-rc1 release candidate. Real Snakemake DAG regression tests are also bundled for execution inside the `snap-snakemake` Conda environment.
 
-## Release-blocking target correction
+## Release-blocking corrections
 
 Validated statically:
 
-- `rule all` contains `default_target: True`.
-- wrapper `preflight` mode explicitly targets `preflight`.
-- wrapper `dry-run` mode explicitly targets `all`.
-- wrapper `run` mode explicitly targets `all`.
-- run mode reports `SNaP SUCCESS` only when the explicit target is `all` and Snakemake returns exit code 0.
+- `rule all` still contains `default_target: True`.
+- wrapper preflight target is separated as `-- preflight`.
+- wrapper dry-run target is separated as `-- all`.
+- wrapper production target is separated as `-- all`.
+- wrapper `EXTRA_ARGS` remain before the target delimiter, so options such as `--keep-going` are not misinterpreted as targets.
+- `--config` internal metadata is placed before the delimiter.
 
-A wrapper smoke test with a fake Snakemake executable confirmed the actual argument sequences:
+The delimiter is required because Snakemake's `--config` accepts multiple values and otherwise can consume a following target as a malformed config item.
 
-```text
-preflight -> ... preflight --forcerun preflight --quiet
-dry-run  -> ... all --dry-run
-run      -> ... all --rerun-incomplete
+## SE / PE wildcard regression
+
+`UNIT_REGEX` is constructed from the retained `local_units` with `re.escape()` and applied as a global `unit` wildcard constraint. This prevents the SE output pattern from matching PE outputs by treating `_R1_paired` / `_R2_paired` as part of `{unit}`.
+
+The output namespace itself is unchanged.
+
+## Workflow config isolation
+
+The Snakefile no longer contains `configfile: "config.yaml"`. Workflow configuration must be supplied explicitly with `--configfile` (or through `scripts/run_snap.sh --config`). This prevents implicit merging of the repository-root config with a user-selected config.
+
+The workflow profiles remain execution/resource-only profiles; none contains a `configfile:` entry.
+
+## Profile metadata
+
+The wrapper reads `resources.mem_mb` from the selected `profiles/<name>/profile.yaml` and passes:
+
+- `snap_resource_profile=<name>`
+- `snap_profile_mem_mb=<MiB>`
+
+to Snakemake before the target delimiter. Preflight therefore reports the selected profile and memory budget without a duplicated hard-coded profile table.
+
+## Bundled regression dry-runs
+
+Run:
+
+```bash
+bash tests/regression/run_regression_tests.sh
 ```
 
-The dry-run smoke test also confirmed that the console retains a `Job stats:` table while per-job details are suppressed, and that the complete native dry-run output remains in `run.log`.
+Expected coverage:
 
-## Resource profiles
+1. PE one unit: one `trim_fastq_pe` job and no scheduled `trim_fastq_se` job.
+2. SE one unit: one `trim_fastq_se` job and no scheduled `trim_fastq_pe` job.
+3. PE two technical units / one biological sample: two trim/mapping unit jobs but one merge/HaplotypeCaller biological-sample job.
+4. No `InputFunctionException in rule trim_fastq_se` from PE paired-output suffixes.
+5. Dry-run reaches `Job stats:` and includes target `all`.
+6. Preflight metadata contains the selected profile and memory budget.
 
-All profile YAML files parse successfully. Current global limits are:
+## Build-environment static checks
 
-| Profile | Cores | Global mem_mb | joint_jobs |
-|---|---:|---:|---:|
-| minimal | 2 | 6000 | 1 |
-| low-memory | 4 | 12000 | 1 |
-| workstation | 12 | 48000 | 1 |
-| server | 30 | 150000 | 2 |
-
-For an illustrative WSL2-visible memory size of 7.3 GiB:
-
-- `minimal` (6000 MiB) -> expected `PASS`.
-- `low-memory` (12000 MiB) -> expected `PASS WITH WARNINGS`.
-- larger profiles -> expected `PASS WITH WARNINGS`.
-
-The wrapper passes both the selected profile name and profile memory budget into the preflight configuration as `snap_resource_profile` and `snap_profile_mem_mb`.
-
-## Preflight warning behavior
-
-Static validation confirms that preflight now reports:
-
-- detected CPU threads;
-- detected physical/visible memory;
-- selected profile;
-- profile memory budget;
-- WSL2-specific memory guidance when applicable;
-- `Validation: PASS WITH WARNINGS` when the selected profile memory budget exceeds detected memory.
-
-## Syntax and configuration checks
-
-Passed in the build environment:
+The release build checks:
 
 - `bash -n scripts/run_snap.sh`;
+- `bash -n tests/regression/run_regression_tests.sh`;
 - `python -m py_compile workflow_inputs.py`;
 - YAML parsing for `config.yaml`, `environment.yaml`, all example configs, and all four resource profiles;
-- static checks for `default_target: True`, explicit wrapper targets, WSL2 warning text, and `PASS WITH WARNINGS`;
-- wrapper run-history smoke test with timestamped logs and metadata.
+- absence of `configfile:` in workflow profiles;
+- explicit `-- preflight` / `-- all` wrapper targets;
+- retained-unit wildcard constraint;
+- `default_target: True`;
+- final SNP ID convention `%CHROM_%POS`;
+- duplicate-retention settings.
 
 ## Core workflow invariants
 
 No intended changes were made to:
 
-- Trimmomatic -> BWA-MEM -> samtools -> MarkDuplicates;
+- Trimmomatic → BWA-MEM → samtools → MarkDuplicates;
 - RAD/DArT duplicate retention behavior;
+- technical-unit BAM merge;
 - configurable ploidy;
 - HaplotypeCaller GVCF calling;
 - GenomicsDBImport / GenotypeGVCFs joint genotyping;
 - `max_alternate_alleles` / `max_genotype_count`;
 - final SNP ID convention `CHROM_POS`;
-- FASTQ extension support;
+- FASTQ extension support and intermediate-FASTQ exclusion;
 - reference interval selection;
 - balanced sharding;
 - Telegram fallback behavior;
 - timestamped run-level logging.
 
-## Remaining end-to-end validation
+## External validation still required before release
 
-The artifact build environment does not contain Snakemake/GATK/BWA/samtools/bcftools/Trimmomatic, so a real full DAG parse and tool execution could not be performed here. Before publishing the GitHub release, rerun the following on the WSL2 test machine using the 4-sample / 13-sequence test dataset:
+On the clean Snakemake 9.26.1 test server, rerun:
 
-1. `minimal` preflight: expect 4 biological samples, 13 selected sequences, 13 contig shards, and `PASS`.
-2. `low-memory` preflight on ~7.3 GiB visible RAM: expect `PASS WITH WARNINGS`.
-3. full dry-run: expect the complete `all` Job stats including trimming, mapping, BAM processing, HaplotypeCaller, GenomicsDBImport, GenotypeGVCFs, final filtering, and `all`.
-4. full run: confirm execution begins with Trimmomatic/BWA rather than stopping after preflight.
-5. rerun after all final outputs exist: `Nothing to be done` is valid and should exit 0.
+```bash
+bash scripts/run_snap.sh --config configs/test.full.yaml --profile minimal --mode preflight
+bash scripts/run_snap.sh --config configs/test.full.yaml --profile minimal --mode dry-run
+```
+
+For PE, the dry-run must show `trim_fastq_pe` and must not schedule `trim_fastq_se`. After the dry-run passes, proceed to a real Full-stage run and verify Trimmomatic → BWA → BAM processing → HaplotypeCaller → GenomicsDB → final VCF.

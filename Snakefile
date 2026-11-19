@@ -1,4 +1,4 @@
-# SNaP — Snakemake for NGS and Polyploids — v1.0.3
+# SNaP — Snakemake for NGS and Polyploids — v1.0.4-rc1
 # Portability/resource-safety release. Final SNP IDs use CHROM_POS (e.g. LG1_123456).
 import glob
 import os
@@ -16,7 +16,14 @@ from pathlib import Path
 
 from snakemake.shell import shell
 
-configfile: "config.yaml"
+# Workflow configuration must be supplied explicitly with --configfile.
+# This prevents a user-selected config from being implicitly merged with the
+# repository-root config.yaml. The wrapper always supplies --configfile.
+if not config:
+    raise ValueError(
+        "No workflow config was loaded. Use --configfile <config.yaml> "
+        "or run SNaP via scripts/run_snap.sh --config <config.yaml>."
+    )
 sys.path.insert(0, workflow.basedir)
 from workflow_inputs import (reference_inputs, select_reference_sequences, build_joint_shards,
                              discover_marked, discover_gvcfs, selected_samples, safe_id, directories)
@@ -537,6 +544,24 @@ if WORKFLOW_STAGE in {"preprocess", "full"}:
     if not local_units:
         raise ValueError(f"No {READ_LAYOUT} FASTQ units were detected/retained in: {fastq_dir}")
 
+# Restrict the {unit} wildcard to retained raw-unit keys. Without this constraint,
+# the generic SE output pattern ``{unit}.trim.fastq.gz`` can also match PE outputs
+# such as ``<unit>_R1_paired.trim.fastq.gz`` by treating the suffix as part of
+# the wildcard. That can route a PE target through trim_fastq_se and trigger a
+# KeyError in the SE input function. Escaping keeps literal sample/unit IDs safe
+# inside the regular expression.
+if local_units:
+    UNIT_REGEX = "(?:" + "|".join(
+        re.escape(unit) for unit in sorted(local_units, key=lambda x: (-len(x), x))
+    ) + ")"
+else:
+    # No preprocessing rules are instantiated for stages without local FASTQ units.
+    # A never-match regex is still defined so the global constraint is valid.
+    UNIT_REGEX = r"(?!)"
+
+wildcard_constraints:
+    unit=UNIT_REGEX
+
 ############################################
 # Stage-isolated discovery
 ############################################
@@ -675,7 +700,7 @@ if WORKFLOW_STAGE in {"joint", "joint_shard", "full"}:
 # Concise console summary (full details are written by rule preflight)
 ############################################
 
-print(f"SNaP v1.0.3 | stage={WORKFLOW_STAGE} | layout={READ_LAYOUT} | ploidy={PLOIDY}")
+print(f"SNaP v1.0.4-rc1 | stage={WORKFLOW_STAGE} | layout={READ_LAYOUT} | ploidy={PLOIDY}")
 print(
     f"Reference: {len(SELECTED_REFERENCE_CONTIGS)}/{len(REFERENCE_CONTIGS)} sequences selected "
     f"({REFERENCE_INTERVAL_MODE}); joint strategy={JOINT_SHARD_STRATEGY}, shards={len(SHARD_RECORDS)}"
@@ -822,7 +847,7 @@ rule preflight:
             sample_preview.append(f"  {raw_unit} -> {get_sm_name(raw_unit)}")
 
         with open(output.summary, "w") as out:
-            out.write("SNaP v1.0.3 preflight\n")
+            out.write("SNaP v1.0.4-rc1 preflight\n")
             out.write("======================\n\n")
             out.write(f"Stage: {WORKFLOW_STAGE}\n")
             out.write(f"Read layout: {READ_LAYOUT}\n")

@@ -6,7 +6,17 @@
 
 SNaP 是以 Snakemake 建立的 RAD-seq / ddRAD-seq / DArT-seq SNP calling workflow，支援 SE/PE、可調 ploidy、GVCF calling、GenomicsDB joint genotyping，以及依 reference sequence 分散式 joint calling。
 
-目前版本：**v1.0.3**
+目前版本：**v1.0.4-rc1**
+
+## v1.0.4-rc1 修正重點
+
+- 修正 `run_snap.sh` 的 Snakemake target CLI parsing：所有 target 均以 `-- preflight` 或 `-- all` 與 options 明確分隔。
+- 修正 SE/PE trimming wildcard collision：`{unit}` 現在只允許匹配本次 FASTQ discovery 實際保留的 raw-unit keys。
+- 移除 Snakefile 對 repo root `config.yaml` 的隱式載入，避免使用者指定的 `--configfile` 又被另一份 config 混入。
+- 保留 `rule all: default_target: True`，並由 wrapper 明確指定 target，形成雙重保護。
+- wrapper 直接從所選 workflow profile 讀取 global `mem_mb`，preflight 可顯示 `Selected profile` 與 `Profile memory budget`。
+- 新增 PE、SE、technical-unit merge、CLI target parsing 與 suffix collision regression-test scaffolding。
+- 核心 SNP calling 與 filtering 邏輯維持 v1.0.3 不變。
 
 ## v1.0.3 修正重點
 
@@ -16,7 +26,6 @@ SNaP 是以 Snakemake 建立的 RAD-seq / ddRAD-seq / DArT-seq SNP calling workf
 - 修正成功判斷，避免只有 preflight 完成卻誤報 Full-stage 成功。
 - 新增適合約 8 GiB 可見記憶體環境的 `minimal` resource profile。
 - 新增 profile-aware RAM warning、`PASS WITH WARNINGS` 與 WSL2 記憶體提示。
-- 核心 SNP calling 與 filtering 邏輯維持 v1.0.2 不變。
 
 ## v1.0.2 導入的主要功能
 
@@ -316,7 +325,7 @@ bash scripts/run_snap.sh \
   --mode dry-run
 ```
 
-Dry-run 明確指定 target `all`，只建立與檢查完整 workflow DAG，不會真正執行分析。wrapper 會把 Snakemake 原始 dry-run 完整輸出保存到 `run.log`，terminal 則過濾成 DAG / Job stats 與重要狀態或錯誤訊息，因此可以保留任務統計表，又不會被逐 sample job details 洗版。這也避免 Snakemake 9.x 的 bare `--quiet` 可能連 Job stats 一起隱藏的情況。
+Dry-run 明確指定 target `all`，只建立與檢查完整 workflow DAG，不會真正執行分析。由於 Snakemake 9.x 的 `--quiet` 可能連 Job stats table 一併隱藏，因此 SNaP 的 dry-run 不再使用 `--quiet`；完整原始輸出會保存到該次 `run.log`，terminal 則只過濾顯示 DAG / Job stats 摘要與重要錯誤，避免逐 sample details 洗版。只有 debug 時才使用 `--printshellcmds`。
 
 只有除錯時才需要完整 shell commands：
 
@@ -325,9 +334,9 @@ snakemake \
   -s Snakefile \
   --configfile config.full.yaml \
   --workflow-profile profiles/minimal \
-  all \
   --dry-run \
-  --printshellcmds
+  --printshellcmds \
+  -- all
 ```
 
 ### Step 8 — 正式執行 Full stage
@@ -893,6 +902,8 @@ GATK Java heap 不再固定為 20/32 GB，而是自動使用約：
 
 建議每次正式執行前先做。wrapper 會把所選 profile 名稱與 global memory budget 傳給 preflight；如果 profile 的 `mem_mb` 高於 SNaP 偵測到的實體記憶體，Validation 會顯示 `PASS WITH WARNINGS`。在 WSL2 中，SNaP 偵測到的是 WSL2 可見的記憶體，不一定等於 Windows 主機實際安裝的 RAM。
 
+自 v1.0.4-rc1 起，Snakefile 不再自動載入 repo root 的 `config.yaml`。請一律透過 wrapper 的 `--config` 或 Snakemake 的 `--configfile` 明確指定 workflow config，以避免不同 config 被隱式合併。
+
 ```bash
 bash scripts/run_snap.sh \
   --config config.full.yaml \
@@ -938,7 +949,7 @@ bash scripts/run_snap.sh \
   --mode dry-run
 ```
 
-wrapper 會明確指定 `all --dry-run`。完整 Snakemake dry-run 輸出會保存到該次執行的 `run.log`，terminal 則只保留 DAG / Job stats 與重要狀態或錯誤訊息，因此不會被逐 sample 的 job details 洗版。
+wrapper 會明確以 `-- all` 指定完整 DAG target，並使用 `--dry-run` 建立完整 DAG。為避免 Snakemake 9.x 的 `--quiet` 隱藏 Job stats，完整 dry-run output 會寫入 `run.log`，terminal 再過濾保留 Job stats 與重要訊息。
 
 需要 debug command 時才直接使用：
 
@@ -947,9 +958,9 @@ snakemake \
   -s Snakefile \
   --configfile config.full.yaml \
   --workflow-profile profiles/workstation \
-  all \
   --dry-run \
-  --printshellcmds
+  --printshellcmds \
+  -- all
 ```
 
 ---
@@ -1429,9 +1440,9 @@ snakemake \
   -s Snakefile \
   --configfile config.yaml \
   --workflow-profile profiles/workstation \
-  all \
   --dry-run \
-  --printshellcmds
+  --printshellcmds \
+  -- all
 ```
 
 正常執行不建議 `--printshellcmds`，避免 tmux/terminal 被大量 command 洗掉。

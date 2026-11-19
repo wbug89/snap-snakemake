@@ -1,5 +1,27 @@
 # Changelog
 
+## v1.0.4-rc1 (release candidate)
+
+### Fixed
+
+- Fixed Snakemake CLI target parsing in `scripts/run_snap.sh`. Workflow targets now follow a literal `--`: preflight uses `-- preflight`, while dry-run and production execution use `-- all`. This prevents `--config` from consuming a target as an invalid `name=value` entry.
+- Fixed the PE dry-run `trim_fastq_se` wildcard collision. The `{unit}` wildcard is now constrained to the retained unit keys discovered from raw FASTQs, so `_R1_paired` / `_R2_paired` outputs cannot be reinterpreted as SE unit IDs.
+- Removed the implicit `configfile: "config.yaml"` from the Snakefile. A user-selected `--configfile` is no longer silently merged with the repository-root config.
+- Kept `rule all` marked with `default_target: True` as a second layer of target-selection protection.
+- Fixed dry-run Job stats visibility with Snakemake 9.x by removing `--quiet` from the dry-run invocation. Full native dry-run output is retained in `run.log`, while terminal output remains filtered to the DAG / Job stats summary and important errors.
+
+### Validation / regression coverage
+
+- Added regression dry-run scaffolding for one-unit PE, one-unit SE, and multiple PE technical units belonging to one biological sample.
+- Added checks for the `-- all` delimiter, profile metadata in preflight, Job stats output, and the SE/PE suffix-collision regression.
+- The wrapper continues to read the selected profile's global `resources.mem_mb` directly and passes it to preflight as internal metadata.
+- Regression failures now report the failed assertion and captured output, and retain the temporary fixture directory for debugging; successful suites still clean up automatically.
+
+### Unchanged
+
+- Core SNP-calling methodology and filtering remain unchanged: Trimmomatic → BWA-MEM → samtools → MarkDuplicates → merge technical units → HaplotypeCaller GVCF → GenomicsDBImport → GenotypeGVCFs → SNP/INDEL selection → `CHROM_POS` IDs → hard filtering.
+- RAD/DArT duplicate handling, configurable ploidy, GenomicsDB joint calling, FASTQ discovery, reference interval selection, balanced sharding, Telegram notifications, and run-level logging remain unchanged.
+
 ## v1.0.3
 
 ### Fixed

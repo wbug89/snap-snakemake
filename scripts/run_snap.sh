@@ -3,7 +3,7 @@ set -uo pipefail
 
 usage() {
   cat <<'EOF'
-SNaP run wrapper (v1.0.3)
+SNaP run wrapper (v1.0.4-rc1)
 
 Usage:
   bash scripts/run_snap.sh --config CONFIG [--profile minimal|low-memory|workstation|server]
@@ -156,27 +156,39 @@ cp "$CONFIG_ABS" "${RUN_DIR}/config.snapshot.yaml"
 } > "${RUN_DIR}/environment.txt"
 
 BASE_CMD=(snakemake -s "$SNAKEFILE" --configfile "$CONFIG_ABS" --workflow-profile "$PROFILE_DIR")
+INTERNAL_CONFIG=(--config snap_resource_profile="$PROFILE" snap_profile_mem_mb="$PROFILE_MEM_MB")
+
+# Snakemake's --config accepts a variable number of arguments. Targets that follow
+# it without a delimiter can therefore be parsed as malformed config entries. Keep
+# every target after a literal `--`. EXTRA_ARGS are Snakemake options supplied via
+# run_snap.sh's own `--`, so they must remain before the target delimiter.
 case "$MODE" in
   preflight)
     MAIN_TARGET="preflight"
     MAIN_CMD=("${BASE_CMD[@]}" \
-      --config snap_resource_profile="$PROFILE" snap_profile_mem_mb="$PROFILE_MEM_MB" snap_preflight_only=true \
-      preflight --forcerun preflight --quiet)
+      --forcerun preflight \
+      --quiet \
+      "${INTERNAL_CONFIG[@]}" snap_preflight_only=true \
+      "${EXTRA_ARGS[@]}" \
+      -- preflight)
     ;;
   dry-run)
     MAIN_TARGET="all"
     MAIN_CMD=("${BASE_CMD[@]}" \
-      --config snap_resource_profile="$PROFILE" snap_profile_mem_mb="$PROFILE_MEM_MB" \
-      all --dry-run)
+      --dry-run \
+      "${INTERNAL_CONFIG[@]}" \
+      "${EXTRA_ARGS[@]}" \
+      -- all)
     ;;
   run)
     MAIN_TARGET="all"
     MAIN_CMD=("${BASE_CMD[@]}" \
-      --config snap_resource_profile="$PROFILE" snap_profile_mem_mb="$PROFILE_MEM_MB" \
-      all --rerun-incomplete)
+      --rerun-incomplete \
+      "${INTERNAL_CONFIG[@]}" \
+      "${EXTRA_ARGS[@]}" \
+      -- all)
     ;;
 esac
-MAIN_CMD+=("${EXTRA_ARGS[@]}")
 
 {
   printf 'cd %q\n' "$ROOT_DIR"
@@ -190,11 +202,11 @@ exec_logged() {
   return "$rc"
 }
 
-# Dry-run output can be enormous for large cohorts. Keep the complete native
-# Snakemake output in run.log, but show only the DAG summary / Job stats and
-# important status or error lines on the console. This avoids relying on bare
-# --quiet, which can suppress the Job stats summary in some Snakemake 9.x
-# logging implementations.
+# Dry-run output can be enormous for large cohorts. Do NOT pass Snakemake's
+# --quiet here: Snakemake 9.x may suppress the Job stats table together with
+# per-job details. Instead, save the complete native dry-run output in run.log
+# and filter only the terminal stream to retain DAG/Job stats and important
+# status/error lines. Debug users can still pass --printshellcmds explicitly.
 exec_dryrun_logged() {
   (cd "$ROOT_DIR" && "$@") 2>&1 \
     | tee -a "$RUN_LOG" \
@@ -236,8 +248,10 @@ echo -e "target\t${MAIN_TARGET}" >> "$METADATA"
 # correspond exactly to this run.
 if [[ "$MODE" != "preflight" ]]; then
   PREFLIGHT_CMD=("${BASE_CMD[@]}" \
-    --config snap_resource_profile="$PROFILE" snap_profile_mem_mb="$PROFILE_MEM_MB" snap_preflight_only=true \
-    preflight --forcerun preflight --quiet)
+    --forcerun preflight \
+    --quiet \
+    "${INTERNAL_CONFIG[@]}" snap_preflight_only=true \
+    -- preflight)
   echo "===== PREFLIGHT =====" | tee -a "$RUN_LOG"
   exec_logged "${PREFLIGHT_CMD[@]}"
   PREFLIGHT_RC=$?

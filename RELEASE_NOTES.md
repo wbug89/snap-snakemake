@@ -1,39 +1,82 @@
-# SNaP v1.0.3 Release Notes
+# SNaP v1.0.4-rc1 Release Candidate Notes
 
-SNaP v1.0.3 is a patch release for the already published v1.0.2 release. It fixes a release-blocking Full-stage target-selection bug discovered during Windows WSL2 user testing. The core SNP-calling methodology is unchanged.
+SNaP v1.0.4-rc1 is a release candidate for the v1.0.4 patch release, prepared after real-world testing of v1.0.3 on a clean Linux installation with Snakemake 9.26.1. It fixes two release-blocking DAG/CLI regressions and removes an implicit workflow-config merge. The core SNP-calling methodology is unchanged.
 
-## Fixed
+## Release-blocking fixes
 
-- `rule all` is explicitly marked with `default_target: True`, so the presence or position of the `preflight` rule can no longer change the default workflow target.
-- `scripts/run_snap.sh` explicitly targets `all` during both dry-run and production execution.
-- Run-mode success reporting now requires successful completion of the explicit `all` target. A successful preflight alone is not reported as a completed Full-stage workflow.
-- Dry-run now builds the complete `all` DAG and retains the Job stats summary while suppressing routine per-job console noise. Full native dry-run output is still saved in `run.log`.
+### 1. Explicit target delimiter
 
-## Added
+Snakemake's `--config` option accepts multiple `name=value` arguments. In v1.0.3, a following target such as `preflight` could therefore be parsed as a malformed config item. The wrapper now places every workflow target after a literal `--`:
 
-- `profiles/minimal/profile.yaml` for systems with about 8 GiB of visible memory.
-- Profile-aware preflight memory checks. If a profile's global memory budget exceeds detected memory, preflight reports `PASS WITH WARNINGS` and recommends a safer profile or additional memory.
-- WSL2-specific guidance explaining that SNaP sees the memory assigned to WSL2, which may be lower than the Windows host's installed RAM.
+```text
+preflight -> ... --config ... -- preflight
+dry-run   -> ... --dry-run ... -- all
+run       -> ... --rerun-incomplete ... -- all
+```
 
-## Resource profiles
+`rule all` remains `default_target: True`, so explicit wrapper targets and the Snakefile default target provide independent protection.
 
-| Profile | Recommended RAM | Intended use |
-|---|---:|---|
-| `minimal` | ~8 GiB | Small datasets, teaching, low-memory laptops, WSL2 testing |
-| `low-memory` | ~16 GiB | General laptops/desktops |
-| `workstation` | 32–64 GiB | Research workstations |
-| `server` | ≥128 GiB | High-memory servers |
+### 2. SE / PE wildcard separation
 
-The `minimal` profile is intentionally conservative. Large cohorts, polyploid datasets, and highly multiallelic loci can still require substantially more memory.
+The generic SE output pattern could previously interpret a PE output such as `<unit>_R1_paired.trim.fastq.gz` as an SE `{unit}` value. This caused `trim_fastq_se` to enter a PE DAG and fail in the SE input function with a `KeyError`.
+
+SNaP v1.0.4-rc1 constrains `{unit}` to the actual retained unit keys discovered for the current run. PE paired/unpaired suffixes therefore cannot become synthetic unit IDs. Output directories and downstream paths remain unchanged.
+
+## Config isolation
+
+The Snakefile no longer auto-loads the repository-root `config.yaml`. Users must explicitly supply a workflow config with either:
+
+```bash
+bash scripts/run_snap.sh --config config.full.yaml ...
+```
+
+or direct Snakemake usage:
+
+```bash
+snakemake -s Snakefile --configfile config.full.yaml ...
+```
+
+This prevents a CLI-selected config from being implicitly extended by unrelated keys from the repository-root `config.yaml`.
+
+## Profile metadata
+
+The wrapper reads the selected workflow profile directly and passes:
+
+- `snap_resource_profile`
+- `snap_profile_mem_mb`
+
+into preflight. This keeps `Selected profile` and `Profile memory budget` synchronized with the actual selected profile without maintaining a second hard-coded lookup table.
+
+## Dry-run Job stats compatibility
+
+Snakemake 9.x may suppress the `Job stats:` table when `--quiet` is used. SNaP v1.0.4-rc1 therefore does not pass `--quiet` for Full-stage dry-runs. The complete native dry-run output is saved to the run log, while the terminal stream is filtered to retain the DAG / Job stats summary and important errors without printing every routine per-sample detail.
+
+## Regression checks
+
+`tests/regression/run_regression_tests.sh` provides synthetic dry-run checks for:
+
+- one-unit PE;
+- one-unit SE;
+- two PE technical units mapping to one biological sample;
+- target delimiter behavior;
+- profile metadata;
+- Job stats generation;
+- the `_R1_paired` / `_R2_paired` suffix collision.
+
+Run it inside the SNaP Conda environment:
+
+```bash
+bash tests/regression/run_regression_tests.sh
+```
+
+The regression harness prints each case as it runs. On failure it reports the failed assertion, prints the captured output, and retains the temporary `/tmp/snap-regression.*` directory for inspection. Successful runs remove temporary fixtures automatically.
 
 ## Unchanged core analysis
-
-The following analysis chain is unchanged from v1.0.2:
 
 ```text
 Trimmomatic
 → BWA-MEM
-→ samtools
+→ samtools sort/index
 → MarkDuplicates
 → merge technical units
 → HaplotypeCaller GVCF
@@ -47,16 +90,14 @@ Trimmomatic
 
 Also unchanged:
 
-- RAD/DArT duplicate reads are marked but not removed.
-- HaplotypeCaller retains duplicate-flagged reads.
-- Ploidy remains configurable.
-- GVCF and GenomicsDB joint genotyping remain unchanged.
-- `max_alternate_alleles` and `max_genotype_count` behavior remains unchanged.
-- FASTQ support remains `.fastq.gz`, `.fq.gz`, `.fastq`, and `.fq`.
-- Reference interval control and balanced sharding remain unchanged.
-- Telegram notification fallback behavior remains unchanged.
-- Timestamped run-level logging remains unchanged.
+- duplicate reads are marked but not removed;
+- HaplotypeCaller retains duplicate-flagged reads;
+- ploidy remains configurable;
+- GenomicsDB joint calling and genotype-complexity controls are unchanged;
+- FASTQ support remains `.fastq.gz`, `.fq.gz`, `.fastq`, and `.fq`;
+- reference interval selection and balanced sharding are unchanged;
+- Telegram notifications and timestamped run-level logging are unchanged.
 
 ## Upgrade recommendation
 
-Users of v1.0.2 should upgrade to v1.0.3, especially when using `workflow_stage: full` or the `scripts/run_snap.sh` wrapper. Existing v1.0.2 Git tags/releases should remain available for reproducibility; do not move or overwrite the v1.0.2 tag.
+Testing users of v1.0.3 are encouraged to evaluate v1.0.4-rc1 before the final v1.0.4 release. Keep existing v1.0.3 tags/releases available for reproducibility rather than moving or overwriting the old tag.

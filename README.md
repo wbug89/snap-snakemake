@@ -6,17 +6,26 @@
 
 SNaP is a Snakemake workflow for RAD-seq/ddRAD-seq/DArT-seq SNP discovery. It supports SE/PE data, configurable ploidy, GVCF calling, GenomicsDB joint genotyping, reference interval selection, distributed joint calling, and memory-aware execution profiles.
 
-Current version: **v1.0.3**
+Current version: **v1.0.4-rc1**
 
-## Highlights in v1.0.3
+## Highlights in v1.0.4-rc1
 
-- Fixes the Full-stage default-target bug discovered after the v1.0.2 GitHub release.
+- Fixes Snakemake target parsing in `scripts/run_snap.sh` by separating workflow targets with `--` (`-- preflight` / `-- all`).
+- Fixes the SE/PE trimming wildcard collision by constraining `{unit}` to the retained raw-unit keys discovered for the current run.
+- Prevents implicit merging of the repository-root `config.yaml` with a user-selected `--configfile`; workflow configs must now be supplied explicitly.
+- Preserves `rule all` as `default_target: True` and keeps explicit wrapper targets as a second layer of protection.
+- Preserves profile-aware preflight metadata (`Selected profile` and `Profile memory budget`) using values read directly from the selected workflow profile.
+- Adds regression-test scaffolding for PE, SE, technical-unit merging, CLI target parsing, and unit-suffix collision.
+- Core SNP-calling methodology and filtering remain unchanged from v1.0.3.
+
+## Highlights introduced in v1.0.3
+
+- Fixed the Full-stage default-target bug discovered after the v1.0.2 GitHub release.
 - `rule all` is explicitly marked as the Snakemake default target.
 - `scripts/run_snap.sh` explicitly targets `all` for dry-run and production runs.
-- Corrects success reporting so a successful preflight alone cannot be reported as a completed Full-stage workflow.
-- Adds the `minimal` resource profile for systems with about 8 GiB of visible memory.
-- Adds profile-aware RAM warnings, `PASS WITH WARNINGS`, and WSL2 memory guidance.
-- Core SNP-calling methodology and filtering remain unchanged from v1.0.2.
+- Corrected success reporting so a successful preflight alone cannot be reported as a completed Full-stage workflow.
+- Added the `minimal` resource profile for systems with about 8 GiB of visible memory.
+- Added profile-aware RAM warnings, `PASS WITH WARNINGS`, and WSL2 memory guidance.
 
 ## Highlights introduced in v1.0.2
 
@@ -286,7 +295,7 @@ bash scripts/run_snap.sh \
   --mode dry-run
 ```
 
-This validates the complete `all` DAG without executing the analysis. The Job stats table remains visible; detailed per-sample job output is retained in the run log instead of flooding the terminal.
+This validates the complete `all` DAG without executing the analysis. The Job stats table remains visible while routine per-sample job details and shell commands are suppressed by default. Use `--printshellcmds` only for debugging.
 
 For debugging only:
 
@@ -295,9 +304,9 @@ snakemake \
   -s Snakefile \
   --configfile config.full.yaml \
   --workflow-profile profiles/minimal \
-  all \
   --dry-run \
-  --printshellcmds
+  --printshellcmds \
+  -- all
 ```
 
 ### Step 8 — Run the Full stage
@@ -548,6 +557,8 @@ Profiles reduce the risk of whole-machine OOM, but they cannot guarantee that a 
 
 The recommended entry point is the run wrapper. The wrapper explicitly targets `preflight` for validation and explicitly targets `all` for both dry-run and real execution. This prevents Snakemake rule order from accidentally changing the requested workflow target.
 
+SNaP v1.0.4-rc1 also requires the workflow configuration to be supplied explicitly. The Snakefile no longer auto-loads the repository-root `config.yaml`, so a config passed with `--configfile` cannot silently inherit unrelated keys from that file. The wrapper already supplies the selected config explicitly.
+
 Preflight reports the selected resource profile, its global memory budget, detected CPU threads, and detected memory. If the profile memory budget exceeds detected memory, validation becomes `PASS WITH WARNINGS` and SNaP recommends a smaller profile. Under WSL2, the detected memory is the memory visible to WSL2, which may be lower than the RAM installed in Windows.
 
 Preflight:
@@ -562,7 +573,7 @@ Concise dry-run:
 bash scripts/run_snap.sh --config config.full.yaml --profile workstation --mode dry-run
 ```
 
-The wrapper explicitly requests target `all` and runs a full Snakemake dry-run. The complete native dry-run output is saved to `run.log`, while the console is filtered to retain the DAG/Job stats summary and important status/error lines without flooding the terminal with per-sample job details. This avoids Snakemake 9.x `--quiet` behavior that can also suppress the Job stats summary. Use `--printshellcmds` only when debugging.
+The wrapper explicitly requests target `all` and runs a full Snakemake dry-run without `--quiet`, because Snakemake 9.x may suppress the Job stats table in quiet mode. The complete native dry-run output is written to `run.log`, while the terminal stream is filtered to keep the DAG / Job stats summary and important errors without flooding the console with routine per-sample details. Use `--printshellcmds` only when debugging.
 
 Normal run:
 
@@ -575,7 +586,7 @@ Only use `--printshellcmds` for debugging:
 ```bash
 snakemake -s Snakefile --configfile config.full.yaml \
   --workflow-profile profiles/workstation \
-  all --dry-run --printshellcmds
+  --dry-run --printshellcmds -- all
 ```
 
 ## 9. Run history and logs

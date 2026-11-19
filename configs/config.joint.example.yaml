@@ -1,4 +1,4 @@
-# SNaP v1.0.3 configuration — stage: joint
+# SNaP v1.0.4-rc1 configuration — stage: joint
 # Copy *.example.yaml to a local config before editing. Do not commit credentials.
 
 workflow_stage: joint

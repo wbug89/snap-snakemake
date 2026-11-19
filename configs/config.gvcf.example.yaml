@@ -1,4 +1,4 @@
-# SNaP v1.0.3 configuration — stage: gvcf
+# SNaP v1.0.4-rc1 configuration — stage: gvcf
 # Copy *.example.yaml to a local config before editing. Do not commit credentials.
 
 workflow_stage: gvcf
