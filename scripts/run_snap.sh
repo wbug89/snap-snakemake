@@ -3,10 +3,10 @@ set -uo pipefail
 
 usage() {
   cat <<'EOF'
-SNaP run wrapper (v1.0.2)
+SNaP run wrapper (v1.0.3)
 
 Usage:
-  bash scripts/run_snap.sh --config CONFIG [--profile low-memory|workstation|server]
+  bash scripts/run_snap.sh --config CONFIG [--profile minimal|low-memory|workstation|server]
                            [--mode run|dry-run|preflight] [-- EXTRA_SNAKEMAKE_ARGS]
 
 Examples:
@@ -64,8 +64,8 @@ if [[ -z "$CONFIG" ]]; then
   echo "ERROR: --config is required." >&2
   exit 2
 fi
-if [[ ! "$PROFILE" =~ ^(low-memory|workstation|server)$ ]]; then
-  echo "ERROR: --profile must be low-memory, workstation, or server." >&2
+if [[ ! "$PROFILE" =~ ^(minimal|low-memory|workstation|server)$ ]]; then
+  echo "ERROR: --profile must be minimal, low-memory, workstation, or server." >&2
   exit 2
 fi
 if [[ ! "$MODE" =~ ^(run|dry-run|preflight)$ ]]; then
@@ -103,7 +103,25 @@ ln -sfn "$RUN_DIR" "${RUN_ROOT}/latest" 2>/dev/null || true
 RUN_LOG="${RUN_DIR}/run.log"
 METADATA="${RUN_DIR}/run_metadata.tsv"
 PROFILE_DIR="${ROOT_DIR}/profiles/${PROFILE}"
+PROFILE_FILE="${PROFILE_DIR}/profile.yaml"
 SNAKEFILE="${ROOT_DIR}/Snakefile"
+
+if [[ ! -f "$PROFILE_FILE" ]]; then
+  echo "ERROR: resource profile not found: $PROFILE_FILE" >&2
+  exit 2
+fi
+
+PROFILE_MEM_MB="$(python - "$PROFILE_FILE" <<'PYPROFILE'
+import sys, yaml
+with open(sys.argv[1]) as fh:
+    cfg = yaml.safe_load(fh) or {}
+resources = cfg.get('resources') or {}
+value = resources.get('mem_mb')
+if value is None:
+    raise SystemExit('profile resources.mem_mb is missing')
+print(int(value))
+PYPROFILE
+)" || exit 2
 
 cp "$CONFIG_ABS" "${RUN_DIR}/config.snapshot.yaml"
 
@@ -113,6 +131,7 @@ cp "$CONFIG_ABS" "${RUN_DIR}/config.snapshot.yaml"
   echo -e "start_time\t$(iso_now)"
   echo -e "mode\t${MODE}"
   echo -e "profile\t${PROFILE}"
+  echo -e "profile_mem_mb\t${PROFILE_MEM_MB}"
   echo -e "config\t${CONFIG_ABS}"
   echo -e "project_dir\t${PROJECT_DIR}"
   echo -e "status\tRUNNING"
@@ -139,13 +158,22 @@ cp "$CONFIG_ABS" "${RUN_DIR}/config.snapshot.yaml"
 BASE_CMD=(snakemake -s "$SNAKEFILE" --configfile "$CONFIG_ABS" --workflow-profile "$PROFILE_DIR")
 case "$MODE" in
   preflight)
-    MAIN_CMD=("${BASE_CMD[@]}" preflight --forcerun preflight --quiet --config snap_preflight_only=true)
+    MAIN_TARGET="preflight"
+    MAIN_CMD=("${BASE_CMD[@]}" \
+      --config snap_resource_profile="$PROFILE" snap_profile_mem_mb="$PROFILE_MEM_MB" snap_preflight_only=true \
+      preflight --forcerun preflight --quiet)
     ;;
   dry-run)
-    MAIN_CMD=("${BASE_CMD[@]}" --dry-run --quiet)
+    MAIN_TARGET="all"
+    MAIN_CMD=("${BASE_CMD[@]}" \
+      --config snap_resource_profile="$PROFILE" snap_profile_mem_mb="$PROFILE_MEM_MB" \
+      all --dry-run)
     ;;
   run)
-    MAIN_CMD=("${BASE_CMD[@]}" --rerun-incomplete)
+    MAIN_TARGET="all"
+    MAIN_CMD=("${BASE_CMD[@]}" \
+      --config snap_resource_profile="$PROFILE" snap_profile_mem_mb="$PROFILE_MEM_MB" \
+      all --rerun-incomplete)
     ;;
 esac
 MAIN_CMD+=("${EXTRA_ARGS[@]}")
@@ -162,6 +190,35 @@ exec_logged() {
   return "$rc"
 }
 
+# Dry-run output can be enormous for large cohorts. Keep the complete native
+# Snakemake output in run.log, but show only the DAG summary / Job stats and
+# important status or error lines on the console. This avoids relying on bare
+# --quiet, which can suppress the Job stats summary in some Snakemake 9.x
+# logging implementations.
+exec_dryrun_logged() {
+  (cd "$ROOT_DIR" && "$@") 2>&1 \
+    | tee -a "$RUN_LOG" \
+    | awk '
+      /^Building DAG of jobs/ { print; next }
+      /^Job stats:/ { in_stats=1; print; next }
+      in_stats {
+        print
+        if ($0 ~ /^[[:space:]]*$/) in_stats=0
+        next
+      }
+      /^Nothing to be done/ { print; next }
+      /^This was a dry-run/ { print; next }
+      /^(WorkflowError|RuleException|MissingInputException|MissingOutputException|SyntaxError|ValueError|ERROR:|Error:|Exception:)/ { print; next }
+    '
+  local rc=${PIPESTATUS[0]}
+  if [[ $rc -ne 0 ]]; then
+    echo "Dry-run failed. See the complete output in: ${RUN_LOG}"
+    echo "Last 40 log lines:"
+    tail -n 40 "$RUN_LOG"
+  fi
+  return "$rc"
+}
+
 {
   echo "SNaP v$(cat "${ROOT_DIR}/VERSION")"
   echo "Run ID: ${RUN_ID}"
@@ -172,10 +229,15 @@ exec_logged() {
   echo
 } | tee -a "$RUN_LOG"
 
+# Record the explicit Snakemake target selected by the wrapper.
+echo -e "target\t${MAIN_TARGET}" >> "$METADATA"
+
 # Always refresh preflight before dry-run or execution so config/reference/sample summaries
 # correspond exactly to this run.
 if [[ "$MODE" != "preflight" ]]; then
-  PREFLIGHT_CMD=("${BASE_CMD[@]}" preflight --forcerun preflight --quiet --config snap_preflight_only=true)
+  PREFLIGHT_CMD=("${BASE_CMD[@]}" \
+    --config snap_resource_profile="$PROFILE" snap_profile_mem_mb="$PROFILE_MEM_MB" snap_preflight_only=true \
+    preflight --forcerun preflight --quiet)
   echo "===== PREFLIGHT =====" | tee -a "$RUN_LOG"
   exec_logged "${PREFLIGHT_CMD[@]}"
   PREFLIGHT_RC=$?
@@ -193,7 +255,11 @@ fi
 
 MODE_LABEL="$(printf '%s' "$MODE" | tr '[:lower:]' '[:upper:]')"
 echo "===== ${MODE_LABEL} =====" | tee -a "$RUN_LOG"
-exec_logged "${MAIN_CMD[@]}"
+if [[ "$MODE" == "dry-run" ]]; then
+  exec_dryrun_logged "${MAIN_CMD[@]}"
+else
+  exec_logged "${MAIN_CMD[@]}"
+fi
 RC=$?
 
 if [[ -f "${PROJECT_DIR}/metadata/preflight_summary.txt" ]]; then
@@ -201,9 +267,29 @@ if [[ -f "${PROJECT_DIR}/metadata/preflight_summary.txt" ]]; then
 fi
 
 if [[ $RC -eq 0 ]]; then
-  STATUS="SUCCESS"
+  case "$MODE" in
+    run)
+      if [[ "$MAIN_TARGET" == "all" ]]; then
+        STATUS="SUCCESS"
+        RESULT_MESSAGE="SNaP SUCCESS; target all satisfied; exit code 0"
+      else
+        STATUS="FAILED_TARGET_CHECK"
+        RC=3
+        RESULT_MESSAGE="SNaP FAILED; run mode did not target all; exit code ${RC}"
+      fi
+      ;;
+    dry-run)
+      STATUS="DRY_RUN_PASSED"
+      RESULT_MESSAGE="SNaP DRY-RUN PASSED; target all; exit code 0"
+      ;;
+    preflight)
+      STATUS="PREFLIGHT_PASSED"
+      RESULT_MESSAGE="SNaP PREFLIGHT PASSED; exit code 0"
+      ;;
+  esac
 else
   STATUS="FAILED"
+  RESULT_MESSAGE="SNaP FAILED; exit code ${RC}"
 fi
 {
   echo -e "end_time\t$(iso_now)"
@@ -212,6 +298,6 @@ fi
 } >> "$METADATA"
 
 echo | tee -a "$RUN_LOG"
-echo "SNaP ${STATUS}; exit code ${RC}" | tee -a "$RUN_LOG"
+echo "$RESULT_MESSAGE" | tee -a "$RUN_LOG"
 echo "Run log: ${RUN_LOG}" | tee -a "$RUN_LOG"
 exit "$RC"

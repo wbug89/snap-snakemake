@@ -1,4 +1,4 @@
-# SNaP v1.0.2 configuration — stage: joint_finalize
+# SNaP v1.0.3 configuration — stage: joint_finalize
 # Copy *.example.yaml to a local config before editing. Do not commit credentials.
 
 workflow_stage: joint_finalize

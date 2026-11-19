@@ -1,47 +1,90 @@
-# SNaP v1.0.2 validation
+# SNaP v1.0.3 validation
 
-Validation performed for the v1.0.2 portability/resource-safety release.
+This file records static and wrapper-level validation performed for the v1.0.3 patch release.
 
-## Passed static checks
+## Release-blocking target correction
 
-- `VERSION` is `1.0.2`.
-- Conda environment name is the stable `snap-snakemake`.
-- `config.yaml`, every `configs/*.example.yaml`, `environment.yaml`, and all workflow profiles parse as valid YAML.
-- All example configs expose the same configurable key tree as `config.yaml`.
-- `workflow_inputs.py` compiles successfully with Python.
-- `scripts/run_snap.sh` passes `bash -n` and avoids Bash-4-only syntax so it is compatible with the Bash 3.2 shipped by macOS.
-- Run-wrapper smoke test with a stub Snakemake executable successfully created a timestamped run-history directory, captured the command/config/environment/Git metadata, streamed a run log, and retained the exit status.
-- Default `sample_group_regex` is consistently `^((?:SM)[0-9]{3})`.
-- Reference interval helper tests passed for `all`, `regex`, `min_length`, and `list`; `file` uses the same validated selection path.
-- Deterministic `contig` and length-balanced joint sharding helper tests passed.
-- `CombineGVCFs` is absent from executable workflow code; joint genotyping remains GenomicsDBImport -> GenotypeGVCFs.
-- Final SNP IDs are still assigned with `bcftools annotate --set-id '%CHROM_%POS'` before hard filtering.
-- `docs/GIT_ON_MAC.md` is not included.
-- `.gitignore` includes macOS/Windows metadata exclusions, including `*:Zone.Identifier`.
+Validated statically:
 
-## Implemented v1.0.2 checks/features
+- `rule all` contains `default_target: True`.
+- wrapper `preflight` mode explicitly targets `preflight`.
+- wrapper `dry-run` mode explicitly targets `all`.
+- wrapper `run` mode explicitly targets `all`.
+- run mode reports `SNaP SUCCESS` only when the explicit target is `all` and Snakemake returns exit code 0.
 
-- FASTQ discovery supports `.fastq.gz`, `.fq.gz`, `.fastq`, and `.fq`.
-- PE discovery validates R1/R2 pairs and rejects ambiguous/missing pairs.
-- FASTQ names containing workflow-intermediate tokens (`trim`, `trimmed`, `paired`, `unpaired`) are excluded from raw-input discovery.
-- Reference preflight checks FASTA, `.fai`, and GATK `.dict`; BWA indexes are required only for `preprocess` and `full`.
-- Reference sequence selection supports `all`, `regex`, `min_length`, `list`, and `file`.
-- Joint sharding supports one-sequence-per-shard (`contig`) and deterministic length-balanced shards (`balanced`).
-- Preflight writes `metadata/preflight_summary.txt`, `metadata/reference_sequences.tsv`, `metadata/selected_intervals.list`, and `metadata/fastq_units.tsv`.
-- Heavy rules declare `mem_mb`; `mem_mb` and `joint_jobs` are global scheduling resources. Java heap is derived from the final per-rule memory allocation with headroom for native/off-heap memory.
-- Low-memory, workstation, and server workflow profiles are included.
-- The recommended wrapper uses concise `--dry-run --quiet` output and does not enable `--printshellcmds` unless the user explicitly passes it.
+A wrapper smoke test with a fake Snakemake executable confirmed the actual argument sequences:
 
-## Limitation of this build-time validation
-
-The artifact-build environment does not contain the Snakemake executable or the bioinformatics toolchain (BWA, samtools, bcftools, GATK, Trimmomatic). Therefore a true `snakemake --lint` / DAG dry-run and end-to-end biological-data run could not be executed here.
-
-Before production use, run on a machine with the SNaP Conda environment:
-
-```bash
-conda activate snap-snakemake
-bash scripts/run_snap.sh --config <your-config.yaml> --profile low-memory --mode preflight
-bash scripts/run_snap.sh --config <your-config.yaml> --profile low-memory --mode dry-run
+```text
+preflight -> ... preflight --forcerun preflight --quiet
+dry-run  -> ... all --dry-run
+run      -> ... all --rerun-incomplete
 ```
 
-Then choose `low-memory`, `workstation`, or `server` for the production run according to the host.
+The dry-run smoke test also confirmed that the console retains a `Job stats:` table while per-job details are suppressed, and that the complete native dry-run output remains in `run.log`.
+
+## Resource profiles
+
+All profile YAML files parse successfully. Current global limits are:
+
+| Profile | Cores | Global mem_mb | joint_jobs |
+|---|---:|---:|---:|
+| minimal | 2 | 6000 | 1 |
+| low-memory | 4 | 12000 | 1 |
+| workstation | 12 | 48000 | 1 |
+| server | 30 | 150000 | 2 |
+
+For an illustrative WSL2-visible memory size of 7.3 GiB:
+
+- `minimal` (6000 MiB) -> expected `PASS`.
+- `low-memory` (12000 MiB) -> expected `PASS WITH WARNINGS`.
+- larger profiles -> expected `PASS WITH WARNINGS`.
+
+The wrapper passes both the selected profile name and profile memory budget into the preflight configuration as `snap_resource_profile` and `snap_profile_mem_mb`.
+
+## Preflight warning behavior
+
+Static validation confirms that preflight now reports:
+
+- detected CPU threads;
+- detected physical/visible memory;
+- selected profile;
+- profile memory budget;
+- WSL2-specific memory guidance when applicable;
+- `Validation: PASS WITH WARNINGS` when the selected profile memory budget exceeds detected memory.
+
+## Syntax and configuration checks
+
+Passed in the build environment:
+
+- `bash -n scripts/run_snap.sh`;
+- `python -m py_compile workflow_inputs.py`;
+- YAML parsing for `config.yaml`, `environment.yaml`, all example configs, and all four resource profiles;
+- static checks for `default_target: True`, explicit wrapper targets, WSL2 warning text, and `PASS WITH WARNINGS`;
+- wrapper run-history smoke test with timestamped logs and metadata.
+
+## Core workflow invariants
+
+No intended changes were made to:
+
+- Trimmomatic -> BWA-MEM -> samtools -> MarkDuplicates;
+- RAD/DArT duplicate retention behavior;
+- configurable ploidy;
+- HaplotypeCaller GVCF calling;
+- GenomicsDBImport / GenotypeGVCFs joint genotyping;
+- `max_alternate_alleles` / `max_genotype_count`;
+- final SNP ID convention `CHROM_POS`;
+- FASTQ extension support;
+- reference interval selection;
+- balanced sharding;
+- Telegram fallback behavior;
+- timestamped run-level logging.
+
+## Remaining end-to-end validation
+
+The artifact build environment does not contain Snakemake/GATK/BWA/samtools/bcftools/Trimmomatic, so a real full DAG parse and tool execution could not be performed here. Before publishing the GitHub release, rerun the following on the WSL2 test machine using the 4-sample / 13-sequence test dataset:
+
+1. `minimal` preflight: expect 4 biological samples, 13 selected sequences, 13 contig shards, and `PASS`.
+2. `low-memory` preflight on ~7.3 GiB visible RAM: expect `PASS WITH WARNINGS`.
+3. full dry-run: expect the complete `all` Job stats including trimming, mapping, BAM processing, HaplotypeCaller, GenomicsDBImport, GenotypeGVCFs, final filtering, and `all`.
+4. full run: confirm execution begins with Trimmomatic/BWA rather than stopping after preflight.
+5. rerun after all final outputs exist: `Nothing to be done` is valid and should exit 0.

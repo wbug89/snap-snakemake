@@ -1,4 +1,4 @@
-# SNaP v1.0.2 configuration — stage: preprocess
+# SNaP v1.0.3 configuration — stage: preprocess
 # Copy *.example.yaml to a local config before editing. Do not commit credentials.
 
 workflow_stage: preprocess

@@ -6,9 +6,19 @@
 
 SNaP 是以 Snakemake 建立的 RAD-seq / ddRAD-seq / DArT-seq SNP calling workflow，支援 SE/PE、可調 ploidy、GVCF calling、GenomicsDB joint genotyping，以及依 reference sequence 分散式 joint calling。
 
-目前版本：**v1.0.2**
+目前版本：**v1.0.3**
 
-## v1.0.2 重點
+## v1.0.3 修正重點
+
+- 修正 v1.0.2 GitHub release 後實測發現的 Full-stage default target 問題。
+- `rule all` 明確設定為 Snakemake default target。
+- `scripts/run_snap.sh` 在 dry-run 與正式 run 時明確指定 `all`。
+- 修正成功判斷，避免只有 preflight 完成卻誤報 Full-stage 成功。
+- 新增適合約 8 GiB 可見記憶體環境的 `minimal` resource profile。
+- 新增 profile-aware RAM warning、`PASS WITH WARNINGS` 與 WSL2 記憶體提示。
+- 核心 SNP calling 與 filtering 邏輯維持 v1.0.2 不變。
+
+## v1.0.2 導入的主要功能
 
 - FASTQ 支援 `.fastq.gz`、`.fq.gz`、`.fastq`、`.fq`。
 - PE 自動驗證 R1/R2 配對，避免 trimmed/paired/unpaired output 被重新當成 raw input。
@@ -17,7 +27,7 @@ SNaP 是以 Snakemake 建立的 RAD-seq / ddRAD-seq / DArT-seq SNP calling workf
 - 可選擇全部 reference sequences、regex、最短長度、指定 list 或檔案。
 - joint sharding 支援 `contig` 與 length-balanced 模式。
 - 所有 heavy rules 宣告 `mem_mb`；Java `-Xmx` 由 rule memory 自動計算。
-- 內建 `low-memory`、`workstation`、`server` 三種 workflow profiles。
+- 內建 `minimal`、`low-memory`、`workstation`、`server` 四種 workflow profiles。
 - Linux、macOS，以及 Windows 10/11 via WSL2。
 - `preflight` target 提供簡潔的執行前摘要。
 - `scripts/run_snap.sh` 每次執行建立完整 run history/log。
@@ -265,15 +275,16 @@ SNaP 會優先使用 config 中的值；config 為空時，再使用 `TG_BOT_TOK
 
 ### Step 5 — 選擇硬體 profile
 
-SNaP 提供三種 profile：
+SNaP 提供四種 profile：
 
 | Profile | 建議硬體 | 用途 |
 |---|---|---|
-| `low-memory` | 約 16 GiB RAM、4–8 CPU threads | 筆電、一般桌機、安全優先 |
+| `minimal` | 約 8 GiB RAM、2–4 CPU threads | 小型資料、教學、低記憶體筆電或 WSL2 測試 |
+| `low-memory` | 約 16 GiB RAM、4–8 CPU threads | 一般筆電 / 桌機 |
 | `workstation` | 約 32–64 GiB RAM、8–16 threads | 一般研究工作站 |
 | `server` | ≥128 GiB RAM | 高記憶體 server |
 
-如果不確定，**先使用 `low-memory`**。
+若 SNaP 偵測到只有約 7–8 GiB RAM，建議使用 **`minimal`**；約 16 GiB 使用 `low-memory`。大型 cohort、多倍體或高 multiallelic complexity 資料仍可能需要比 `minimal` 更多的記憶體。
 
 不要因為電腦有很多 CPU cores 就直接使用：
 
@@ -288,7 +299,7 @@ snakemake --cores all
 ```bash
 bash scripts/run_snap.sh \
   --config config.full.yaml \
-  --profile low-memory \
+  --profile minimal \
   --mode preflight
 ```
 
@@ -301,11 +312,11 @@ Preflight 會檢查 config、FASTQ、PE R1/R2 pairing、`sample_group_regex`、r
 ```bash
 bash scripts/run_snap.sh \
   --config config.full.yaml \
-  --profile low-memory \
+  --profile minimal \
   --mode dry-run
 ```
 
-Dry-run 只建立與檢查 workflow DAG，不會真正執行分析。
+Dry-run 明確指定 target `all`，只建立與檢查完整 workflow DAG，不會真正執行分析。wrapper 會把 Snakemake 原始 dry-run 完整輸出保存到 `run.log`，terminal 則過濾成 DAG / Job stats 與重要狀態或錯誤訊息，因此可以保留任務統計表，又不會被逐 sample job details 洗版。這也避免 Snakemake 9.x 的 bare `--quiet` 可能連 Job stats 一起隱藏的情況。
 
 只有除錯時才需要完整 shell commands：
 
@@ -313,14 +324,24 @@ Dry-run 只建立與檢查 workflow DAG，不會真正執行分析。
 snakemake \
   -s Snakefile \
   --configfile config.full.yaml \
-  --workflow-profile profiles/low-memory \
+  --workflow-profile profiles/minimal \
+  all \
   --dry-run \
   --printshellcmds
 ```
 
 ### Step 8 — 正式執行 Full stage
 
-一般電腦 / low-memory：
+約 7–8 GiB RAM 的電腦或低記憶體 WSL2：
+
+```bash
+bash scripts/run_snap.sh \
+  --config config.full.yaml \
+  --profile minimal \
+  --mode run
+```
+
+約 16 GiB RAM 的一般筆電 / 桌機：
 
 ```bash
 bash scripts/run_snap.sh \
@@ -413,25 +434,25 @@ conda activate snap-snakemake
 ```bash
 bash scripts/run_snap.sh \
   --config config.full.yaml \
-  --profile low-memory \
+  --profile minimal \
   --mode preflight
 ```
 
 ```bash
 bash scripts/run_snap.sh \
   --config config.full.yaml \
-  --profile low-memory \
+  --profile minimal \
   --mode dry-run
 ```
 
 ```bash
 bash scripts/run_snap.sh \
   --config config.full.yaml \
-  --profile low-memory \
+  --profile minimal \
   --mode run
 ```
 
-若機器有 32–64 GiB RAM，可以把三個 wrapper command 中的 `low-memory` 改成 `workstation`。
+約 16 GiB RAM 可把 `minimal` 改成 `low-memory`；32–64 GiB 使用 `workstation`；≥128 GiB 使用 `server`。
 
 ---
 
@@ -794,10 +815,23 @@ joint_sharding:
 SNaP 提供：
 
 ```text
+profiles/minimal/
 profiles/low-memory/
 profiles/workstation/
 profiles/server/
 ```
+
+### minimal
+
+目標：約 8 GiB RAM、2–4 CPU threads。
+
+```text
+cores: 2
+global mem_mb: 6000
+joint_jobs: 1
+```
+
+適合小型資料、教學、smoke test 與低記憶體筆電 / WSL2。大型 cohort、多倍體或高 multiallelic complexity 資料仍可能需要更多 RAM。
 
 ### low-memory
 
@@ -857,7 +891,7 @@ GATK Java heap 不再固定為 20/32 GB，而是自動使用約：
 
 ## 9. Preflight
 
-建議每次正式執行前先做：
+建議每次正式執行前先做。wrapper 會把所選 profile 名稱與 global memory budget 傳給 preflight；如果 profile 的 `mem_mb` 高於 SNaP 偵測到的實體記憶體，Validation 會顯示 `PASS WITH WARNINGS`。在 WSL2 中，SNaP 偵測到的是 WSL2 可見的記憶體，不一定等於 Windows 主機實際安裝的 RAM。
 
 ```bash
 bash scripts/run_snap.sh \
@@ -904,13 +938,7 @@ bash scripts/run_snap.sh \
   --mode dry-run
 ```
 
-wrapper 使用 Snakemake 的：
-
-```text
---dry-run --quiet
-```
-
-因此主要顯示 DAG/job summary，而不是列出每個 sample 的完整 shell command。
+wrapper 會明確指定 `all --dry-run`。完整 Snakemake dry-run 輸出會保存到該次執行的 `run.log`，terminal 則只保留 DAG / Job stats 與重要狀態或錯誤訊息，因此不會被逐 sample 的 job details 洗版。
 
 需要 debug command 時才直接使用：
 
@@ -919,6 +947,7 @@ snakemake \
   -s Snakefile \
   --configfile config.full.yaml \
   --workflow-profile profiles/workstation \
+  all \
   --dry-run \
   --printshellcmds
 ```
@@ -1400,6 +1429,7 @@ snakemake \
   -s Snakefile \
   --configfile config.yaml \
   --workflow-profile profiles/workstation \
+  all \
   --dry-run \
   --printshellcmds
 ```

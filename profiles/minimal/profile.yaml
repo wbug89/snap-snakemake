@@ -1,0 +1,35 @@
+# SNaP minimal profile: intended for ~8 GiB RAM and 2-4 CPU threads.
+# Best for small datasets, teaching, smoke tests, and constrained laptops/WSL2.
+# Large cohorts, polyploid data, or highly multiallelic regions may require more memory.
+cores: 2
+resources:
+  mem_mb: 6000
+  joint_jobs: 1
+rerun-incomplete: true
+set-threads:
+  trim_fastq_se: 1
+  trim_fastq_pe: 1
+  bwa_mapping: 2
+  samtools_sort_index: 1
+  gatk_haplotypecaller: 1
+set-resources:
+  trim_fastq_se:
+    mem_mb: 1024
+  trim_fastq_pe:
+    mem_mb: 1024
+  bwa_mapping:
+    mem_mb: 2048
+  samtools_sort_index:
+    mem_mb: 2048
+  mark_duplicates:
+    mem_mb: 3072
+  merge_marked_bam:
+    mem_mb: 2048
+  gatk_haplotypecaller:
+    mem_mb: 4096
+  genomicsdb_import:
+    mem_mb: 4096
+  genotype_gvcfs:
+    mem_mb: 5632
+  concat_joint_vcfs:
+    mem_mb: 1536

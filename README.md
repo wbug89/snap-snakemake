@@ -6,9 +6,19 @@
 
 SNaP is a Snakemake workflow for RAD-seq/ddRAD-seq/DArT-seq SNP discovery. It supports SE/PE data, configurable ploidy, GVCF calling, GenomicsDB joint genotyping, reference interval selection, distributed joint calling, and memory-aware execution profiles.
 
-Current version: **v1.0.2**
+Current version: **v1.0.3**
 
-## Highlights in v1.0.2
+## Highlights in v1.0.3
+
+- Fixes the Full-stage default-target bug discovered after the v1.0.2 GitHub release.
+- `rule all` is explicitly marked as the Snakemake default target.
+- `scripts/run_snap.sh` explicitly targets `all` for dry-run and production runs.
+- Corrects success reporting so a successful preflight alone cannot be reported as a completed Full-stage workflow.
+- Adds the `minimal` resource profile for systems with about 8 GiB of visible memory.
+- Adds profile-aware RAM warnings, `PASS WITH WARNINGS`, and WSL2 memory guidance.
+- Core SNP-calling methodology and filtering remain unchanged from v1.0.2.
+
+## Highlights introduced in v1.0.2
 
 - Raw FASTQ: `.fastq.gz`, `.fq.gz`, `.fastq`, `.fq`.
 - Robust PE R1/R2 validation and exclusion of trimmed/paired/unpaired intermediate FASTQs.
@@ -16,7 +26,7 @@ Current version: **v1.0.2**
 - Reference sequence selection: `all`, `regex`, `min_length`, `list`, `file`.
 - Joint sharding: one-sequence-per-shard (`contig`) or deterministic length-balanced shards (`balanced`).
 - Per-rule memory declarations and dynamic Java heap sizing.
-- Built-in `low-memory`, `workstation`, and `server` workflow profiles.
+- Built-in `minimal`, `low-memory`, `workstation`, and `server` workflow profiles.
 - Linux, macOS, and Windows via WSL2.
 - Concise preflight/dry-run workflow.
 - Run-level history/logging through `scripts/run_snap.sh`.
@@ -241,11 +251,12 @@ The next preflight step also verifies whether the Telegram configuration can be 
 
 | Profile | Recommended hardware | Typical use |
 |---|---|---|
-| `low-memory` | ~16 GiB RAM, 4–8 CPU threads | Laptop or ordinary desktop |
+| `minimal` | ~8 GiB RAM, 2–4 CPU threads | Small datasets, teaching, low-memory laptops/WSL2 tests |
+| `low-memory` | ~16 GiB RAM, 4–8 CPU threads | Ordinary laptop or desktop |
 | `workstation` | ~32–64 GiB RAM, 8–16 threads | Research workstation |
 | `server` | ≥128 GiB RAM | High-memory server |
 
-If unsure, start with `low-memory`.
+If SNaP sees only ~7–8 GiB RAM, use `minimal`. For ~16 GiB, use `low-memory`. Large cohorts, polyploid datasets, or highly multiallelic regions may require substantially more memory than the `minimal` profile can provide.
 
 Avoid starting with:
 
@@ -260,7 +271,7 @@ for a memory-intensive variant-calling workflow.
 ```bash
 bash scripts/run_snap.sh \
   --config config.full.yaml \
-  --profile low-memory \
+  --profile minimal \
   --mode preflight
 ```
 
@@ -271,11 +282,11 @@ Fix any reported input, reference, sample-parsing, interval, sharding, resource,
 ```bash
 bash scripts/run_snap.sh \
   --config config.full.yaml \
-  --profile low-memory \
+  --profile minimal \
   --mode dry-run
 ```
 
-This validates the DAG without executing the analysis.
+This validates the complete `all` DAG without executing the analysis. The Job stats table remains visible; detailed per-sample job output is retained in the run log instead of flooding the terminal.
 
 For debugging only:
 
@@ -283,14 +294,24 @@ For debugging only:
 snakemake \
   -s Snakefile \
   --configfile config.full.yaml \
-  --workflow-profile profiles/low-memory \
+  --workflow-profile profiles/minimal \
+  all \
   --dry-run \
   --printshellcmds
 ```
 
 ### Step 8 — Run the Full stage
 
-For a low-memory computer:
+For a ~8 GiB computer or constrained WSL2 environment:
+
+```bash
+bash scripts/run_snap.sh \
+  --config config.full.yaml \
+  --profile minimal \
+  --mode run
+```
+
+For a ~16 GiB laptop or desktop:
 
 ```bash
 bash scripts/run_snap.sh \
@@ -371,25 +392,25 @@ conda activate snap-snakemake
 ```bash
 bash scripts/run_snap.sh \
   --config config.full.yaml \
-  --profile low-memory \
+  --profile minimal \
   --mode preflight
 ```
 
 ```bash
 bash scripts/run_snap.sh \
   --config config.full.yaml \
-  --profile low-memory \
+  --profile minimal \
   --mode dry-run
 ```
 
 ```bash
 bash scripts/run_snap.sh \
   --config config.full.yaml \
-  --profile low-memory \
+  --profile minimal \
   --mode run
 ```
 
-If the computer has 32–64 GiB RAM, replace `low-memory` with `workstation` in the three wrapper commands above.
+For ~16 GiB RAM, replace `minimal` with `low-memory`. For 32–64 GiB, use `workstation`; for ≥128 GiB, use `server`.
 
 ## 1. Installation
 
@@ -511,10 +532,13 @@ For distributed `joint_shard`, all sequences inside a balanced shard must be ass
 Profiles are under:
 
 ```text
+profiles/minimal/      # ~8 GiB RAM
 profiles/low-memory/   # ~16 GiB RAM
 profiles/workstation/  # ~32-64 GiB RAM
 profiles/server/       # >=128 GiB RAM
 ```
+
+The `minimal` profile uses 2 cores, a 6000 MiB global memory budget, and `joint_jobs: 1`. It is intended for small datasets, teaching, smoke tests, and machines where SNaP sees roughly 7–8 GiB RAM. Large cohorts, polyploid data, or highly multiallelic regions may still require more memory.
 
 Heavy rules declare `mem_mb`. SNaP marks `mem_mb` and `joint_jobs` as global scheduling resources so profile-level limits constrain concurrent high-memory jobs. GATK `-Xmx` is calculated from approximately 75% of the final per-rule `mem_mb`, leaving headroom for native/off-heap memory.
 
@@ -522,7 +546,9 @@ Profiles reduce the risk of whole-machine OOM, but they cannot guarantee that a 
 
 ## 8. Preflight, dry-run, and execution
 
-The recommended entry point is the run wrapper.
+The recommended entry point is the run wrapper. The wrapper explicitly targets `preflight` for validation and explicitly targets `all` for both dry-run and real execution. This prevents Snakemake rule order from accidentally changing the requested workflow target.
+
+Preflight reports the selected resource profile, its global memory budget, detected CPU threads, and detected memory. If the profile memory budget exceeds detected memory, validation becomes `PASS WITH WARNINGS` and SNaP recommends a smaller profile. Under WSL2, the detected memory is the memory visible to WSL2, which may be lower than the RAM installed in Windows.
 
 Preflight:
 
@@ -536,7 +562,7 @@ Concise dry-run:
 bash scripts/run_snap.sh --config config.full.yaml --profile workstation --mode dry-run
 ```
 
-The dry-run uses Snakemake `--dry-run --quiet`, avoiding thousands of per-job shell commands.
+The wrapper explicitly requests target `all` and runs a full Snakemake dry-run. The complete native dry-run output is saved to `run.log`, while the console is filtered to retain the DAG/Job stats summary and important status/error lines without flooding the terminal with per-sample job details. This avoids Snakemake 9.x `--quiet` behavior that can also suppress the Job stats summary. Use `--printshellcmds` only when debugging.
 
 Normal run:
 
@@ -549,7 +575,7 @@ Only use `--printshellcmds` for debugging:
 ```bash
 snakemake -s Snakefile --configfile config.full.yaml \
   --workflow-profile profiles/workstation \
-  --dry-run --printshellcmds
+  all --dry-run --printshellcmds
 ```
 
 ## 9. Run history and logs

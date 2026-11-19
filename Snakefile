@@ -1,4 +1,4 @@
-# SNaP — Snakemake for NGS and Polyploids — v1.0.2
+# SNaP — Snakemake for NGS and Polyploids — v1.0.3
 # Portability/resource-safety release. Final SNP IDs use CHROM_POS (e.g. LG1_123456).
 import glob
 import os
@@ -138,6 +138,24 @@ def detected_memory_mb():
 
 DETECTED_CPU_THREADS = os.cpu_count() or 1
 DETECTED_MEMORY_MB = detected_memory_mb()
+SNAP_RESOURCE_PROFILE = str(config.get("snap_resource_profile", "unspecified") or "unspecified")
+try:
+    SNAP_PROFILE_MEM_MB = int(config.get("snap_profile_mem_mb", 0) or 0)
+except (TypeError, ValueError):
+    raise ValueError("snap_profile_mem_mb must be an integer number of MiB")
+
+PLATFORM_RELEASE = platform.release()
+PLATFORM_DESCRIPTION = platform.platform()
+IS_WSL2 = "microsoft" in PLATFORM_RELEASE.lower() or "wsl" in PLATFORM_RELEASE.lower()
+
+RESOURCE_WARNINGS = []
+if DETECTED_MEMORY_MB and SNAP_PROFILE_MEM_MB and SNAP_PROFILE_MEM_MB > DETECTED_MEMORY_MB:
+    RESOURCE_WARNINGS.append(
+        "The selected resource profile requests more memory than the detected physical memory. "
+        f"Detected memory: {DETECTED_MEMORY_MB / 1024:.1f} GiB; "
+        f"Profile memory budget: {SNAP_PROFILE_MEM_MB / 1024:.1f} GiB. "
+        "Use a smaller resource profile or increase available memory."
+    )
 
 ############################################
 # Optional notifications
@@ -657,7 +675,7 @@ if WORKFLOW_STAGE in {"joint", "joint_shard", "full"}:
 # Concise console summary (full details are written by rule preflight)
 ############################################
 
-print(f"SNaP v1.0.2 | stage={WORKFLOW_STAGE} | layout={READ_LAYOUT} | ploidy={PLOIDY}")
+print(f"SNaP v1.0.3 | stage={WORKFLOW_STAGE} | layout={READ_LAYOUT} | ploidy={PLOIDY}")
 print(
     f"Reference: {len(SELECTED_REFERENCE_CONTIGS)}/{len(REFERENCE_CONTIGS)} sequences selected "
     f"({REFERENCE_INTERVAL_MODE}); joint strategy={JOINT_SHARD_STRATEGY}, shards={len(SHARD_RECORDS)}"
@@ -804,17 +822,40 @@ rule preflight:
             sample_preview.append(f"  {raw_unit} -> {get_sm_name(raw_unit)}")
 
         with open(output.summary, "w") as out:
-            out.write("SNaP v1.0.2 preflight\n")
+            out.write("SNaP v1.0.3 preflight\n")
             out.write("======================\n\n")
             out.write(f"Stage: {WORKFLOW_STAGE}\n")
             out.write(f"Read layout: {READ_LAYOUT}\n")
             out.write(f"Ploidy: {PLOIDY}\n")
-            out.write(f"Platform: {platform.system()} {platform.machine()}\n")
+            out.write(f"Platform: {PLATFORM_DESCRIPTION}\n")
+            out.write("\nResources\n---------\n")
             out.write(f"Detected CPU threads: {DETECTED_CPU_THREADS}\n")
             out.write(
                 "Detected physical memory: "
                 + (f"{DETECTED_MEMORY_MB / 1024:.1f} GiB\n" if DETECTED_MEMORY_MB else "unknown\n")
             )
+            out.write(f"Selected profile: {SNAP_RESOURCE_PROFILE}\n")
+            out.write(
+                "Profile memory budget: "
+                + (f"{SNAP_PROFILE_MEM_MB / 1024:.1f} GiB ({SNAP_PROFILE_MEM_MB} MiB)\n" if SNAP_PROFILE_MEM_MB else "not provided\n")
+            )
+            if IS_WSL2:
+                out.write(
+                    "WSL2 detected: memory visible to SNaP is the memory assigned to WSL2, "
+                    "not necessarily the total physical RAM installed in Windows.\n"
+                )
+            if RESOURCE_WARNINGS:
+                out.write("\nWARNING:\n")
+                for warning in RESOURCE_WARNINGS:
+                    out.write(f"- {warning}\n")
+                if IS_WSL2:
+                    out.write(
+                        '- Consider using the "minimal" profile or increasing the WSL2 memory limit.\n'
+                    )
+                else:
+                    out.write(
+                        '- Consider using a smaller resource profile or increasing available RAM.\n'
+                    )
             out.write("\nReference\n---------\n")
             out.write(f"FASTA: {reference_dir}\n")
             out.write(f"Sequences in FASTA: {len(REFERENCE_CONTIGS)}\n")
@@ -857,7 +898,10 @@ rule preflight:
                 out.write(f"Active joint shards: {len(ACTIVE_SHARD_RECORDS)}\n")
             if WORKFLOW_STAGE == "joint_finalize":
                 out.write(f"\nPer-shard VCFs available: {len(external_per_contig)}\n")
-            out.write("\nValidation: PASS\n")
+            if RESOURCE_WARNINGS:
+                out.write("\nValidation: PASS WITH WARNINGS\n")
+            else:
+                out.write("\nValidation: PASS\n")
 
         print(Path(output.summary).read_text())
         print(f"Preflight summary written to: {output.summary}")
@@ -939,6 +983,7 @@ def all_targets(wc):
 rule all:
     input:
         all_targets
+    default_target: True
 
 
 if WORKFLOW_STAGE in {"preprocess", "full"}:
@@ -1470,7 +1515,7 @@ if WORKFLOW_STAGE in {"joint", "full", "joint_finalize"}:
             os.path.join(log_dir, "set_snp_id.log")
         shell:
             r"""
-            {BCFTOOLS:q} annotate --set-id '%CHROM\\_%POS' {input:q} -Oz -o {output.vcf:q} > {log:q} 2>&1
+            {BCFTOOLS:q} annotate --set-id '%CHROM_%POS' {input:q} -Oz -o {output.vcf:q} > {log:q} 2>&1
             {BCFTOOLS:q} index -t --force {output.vcf:q} >> {log:q} 2>&1
             """
 
@@ -1485,7 +1530,7 @@ if WORKFLOW_STAGE in {"joint", "full", "joint_finalize"}:
             os.path.join(log_dir, "set_indel_id.log")
         shell:
             r"""
-            {BCFTOOLS:q} annotate --set-id '%CHROM\\_%POS' {input:q} -Oz -o {output.vcf:q} > {log:q} 2>&1
+            {BCFTOOLS:q} annotate --set-id '%CHROM_%POS' {input:q} -Oz -o {output.vcf:q} > {log:q} 2>&1
             {BCFTOOLS:q} index -t --force {output.vcf:q} >> {log:q} 2>&1
             """
 

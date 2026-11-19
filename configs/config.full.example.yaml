@@ -1,4 +1,4 @@
-# SNaP v1.0.2 configuration — stage: full
+# SNaP v1.0.3 configuration — stage: full
 # Copy *.example.yaml to a local config before editing. Do not commit credentials.
 
 workflow_stage: full
